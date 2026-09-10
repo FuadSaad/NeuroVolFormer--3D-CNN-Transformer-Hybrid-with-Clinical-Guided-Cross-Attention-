@@ -413,7 +413,7 @@ class GNNTrainer:
         train_mask = self.graph.train_mask
         loss_cls = self.criterion(logits[train_mask], self.graph.y[train_mask])
 
-        if cog_pred is not None:
+        if cog_pred is not None and self.lambda_cog > 0.0:
             cog_target = self._get_cognitive_target()
             loss_cog = F.mse_loss(cog_pred[train_mask], cog_target[train_mask])
             total_loss = loss_cls + self.lambda_cog * loss_cog
@@ -441,11 +441,16 @@ class GNNTrainer:
 
             if isinstance(out, tuple):
                 logits, cog_pred = out
-                cog_target = self._get_cognitive_target()
-                loss_cog = F.mse_loss(cog_pred[mask], cog_target[mask])
-                total_loss = loss_cls = self.criterion(logits[mask], self.graph.y[mask]) + self.lambda_cog * loss_cog
-                mae = F.l1_loss(cog_pred[mask], cog_target[mask]).item()
-                cog_np = cog_pred[mask].cpu().numpy().squeeze()
+                if self.lambda_cog > 0.0:
+                    cog_target = self._get_cognitive_target()
+                    loss_cog = F.mse_loss(cog_pred[mask], cog_target[mask])
+                    total_loss = self.criterion(logits[mask], self.graph.y[mask]) + self.lambda_cog * loss_cog
+                    mae = F.l1_loss(cog_pred[mask], cog_target[mask]).item()
+                    cog_np = cog_pred[mask].cpu().numpy().squeeze()
+                else:
+                    total_loss = self.criterion(logits[mask], self.graph.y[mask])
+                    mae = 0.0
+                    cog_np = None
             else:
                 logits = out
                 cog_pred = None

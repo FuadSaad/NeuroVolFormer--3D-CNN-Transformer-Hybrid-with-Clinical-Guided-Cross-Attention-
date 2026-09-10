@@ -139,7 +139,7 @@ def find_kaggle_path(patterns: Union[str, List[str]], is_dir: bool = False, defa
     clean_pats = [_clean(p) for p in pat_list]
 
     # 2. Check local directory candidates
-    for base in ['.', '..', 'data']:
+    for base in ['.', 'data']:
         if os.path.exists(base):
             try:
                 for entry in os.listdir(base):
@@ -225,7 +225,7 @@ class Config:
     GAT_HEADS = 4                 # Multi-head attention heads in GATv2
     GAT_DROPOUT = 0.15            # Calibrated dropout for graph representation (relaxed from 0.35 to prevent underfitting)
     L2_REGULARIZATION = 1e-4      # Weight decay for GAT (relaxed from 1e-3)
-    AUX_COG_WEIGHT = 0.02         # Balanced auxiliary cognitive loss weight (prevents 1D regression from dominating 4-class manifold)
+    AUX_COG_WEIGHT = 0.0          # Classification-only ablation mode (0.0 decouples cognitive regression to prevent class collapse)
 
     # ── Cohort Participant-Level Independence ──
     ONE_SCAN_PER_SUBJECT = True   # The one-scan-per-subject protocol eliminates within-subject repeated-measure dependence.
@@ -266,11 +266,11 @@ class Config:
     T_MULT = 2
 
     # ── Loss & Cost-Sensitive Learning (Targeting 85-88% with Calibrated LMCI F1) ──
-    LABEL_SMOOTHING = 0.05        # Label smoothing for focal loss
-    FOCAL_GAMMA = 1.0             # Balanced focusing parameter (1.0 prevents over-suppression of gradients)
-    USE_FOCAL_LOSS = True         # True=ClassBalancedFocalLoss
+    LABEL_SMOOTHING = 0.05        # Label smoothing for focal / cross-entropy loss
+    FOCAL_GAMMA = 1.0             # Focusing parameter if focal loss enabled
+    USE_FOCAL_LOSS = False        # False: Standard symmetrical Cross-Entropy (eliminates LMCI bias and restores CN/EMCI recall)
     CUSTOM_CLASS_WEIGHTS = [1.0, 1.0, 1.0, 1.0]  # Neutral base weights
-    USE_CUSTOM_CLASS_WEIGHTS = False             # False: rely on mathematically pure Effective Number of Samples (Cui et al., CVPR 2019)
+    USE_CUSTOM_CLASS_WEIGHTS = False             # False: balanced symmetric loss
     USE_COST_SENSITIVE_LOSS = False              # False: avoid artificial bias that induces high LMCI false alarms
     COST_EMCI_LMCI_PENALTY = 1.0                 # Neutral penalty
     FAIR_BASELINE_MODE = True                    # Symmetrical evaluation: Baselines & NeuroGAT receive identical features
@@ -278,12 +278,12 @@ class Config:
     # ── Logit Adjustment (NeurIPS 2020) & Effective Number of Samples (CVPR 2019) ──
     USE_LOGIT_ADJUSTMENT = False                 # Disabled when Effective Samples is active to prevent over-adjustment
     LOGIT_ADJUST_TAU = 0.1                       # Mild temperature scaling if enabled
-    USE_EFFECTIVE_NUM_SAMPLES = True             # Information-theoretic sample weighting (Cui et al., CVPR 2019)
-    EFFECTIVE_NUM_BETA = 0.999                   # Beta=0.999 yields smooth ~1.56x LMCI weight perfectly fitting 2:1 ratio
+    USE_EFFECTIVE_NUM_SAMPLES = False            # False: symmetrical loss avoids disproportionately inflating LMCI
+    EFFECTIVE_NUM_BETA = 0.999                   # Beta=0.999 if effective samples enabled
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
-    USE_DROPEDGE = True                          # Graph data augmentation & over-smoothing prevention
-    DROPEDGE_RATE = 0.05                         # Calibrated DropEdge (relaxed from 0.15 to preserve small-graph connectivity)
+    USE_DROPEDGE = False                         # Preserves full graph topology to resolve underfitting
+    DROPEDGE_RATE = 0.0                          # DropEdge rate set to 0.0 for stable message passing
     BOOTSTRAP_ITERATIONS = 1000                  # 1,000 resamplings for 95% Confidence Intervals
     MCNEMAR_CORRECTION = 'holm-bonferroni'       # Stepwise family-wise error rate control
     GENERATE_LATEX_TABLES = True                 # Export camera-ready booktabs .tex tables
