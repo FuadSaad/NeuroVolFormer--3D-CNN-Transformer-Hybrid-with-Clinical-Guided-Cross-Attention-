@@ -615,6 +615,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
         graph_data.train_mask[train_idx] = True
         graph_data.val_mask[val_idx] = True
+        graph_data.test_mask[test_indices] = True
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
