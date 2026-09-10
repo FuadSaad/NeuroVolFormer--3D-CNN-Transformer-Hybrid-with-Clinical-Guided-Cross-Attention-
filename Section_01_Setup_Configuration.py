@@ -231,21 +231,21 @@ class Config:
     T_0 = 20                      # CosineAnnealingWarmRestarts period
     T_MULT = 2
 
-    # ── Loss & Cost-Sensitive Learning (Targeting 88%+ with LMCI Boost) ──
+    # ── Loss & Cost-Sensitive Learning (Targeting 85-88% with Calibrated LMCI F1) ──
     LABEL_SMOOTHING = 0.05        # Label smoothing for focal loss
-    FOCAL_GAMMA = 2.0             # Focusing parameter for hard minority examples
+    FOCAL_GAMMA = 1.5             # Mild focusing parameter (1.5 prevents majority overconfidence without over-penalizing)
     USE_FOCAL_LOSS = True         # True=ClassBalancedFocalLoss
-    CUSTOM_CLASS_WEIGHTS = [1.2, 0.8, 0.8, 2.0]  # Prioritize LMCI (idx 3) & AD (idx 0)
-    USE_CUSTOM_CLASS_WEIGHTS = True              # Use boosted weights for bottleneck classes
-    USE_COST_SENSITIVE_LOSS = True               # Asymmetric penalty for transitional misclassifications
-    COST_EMCI_LMCI_PENALTY = 2.5                 # Heavy penalty for EMCI <-> LMCI confusion
+    CUSTOM_CLASS_WEIGHTS = [1.0, 1.0, 1.0, 1.0]  # Neutral base weights
+    USE_CUSTOM_CLASS_WEIGHTS = False             # False: rely on mathematically pure Effective Number of Samples (Cui et al., CVPR 2019)
+    USE_COST_SENSITIVE_LOSS = False              # False: avoid artificial bias that induces high LMCI false alarms
+    COST_EMCI_LMCI_PENALTY = 1.0                 # Neutral penalty
     FAIR_BASELINE_MODE = True                    # Exclude diagnostic target proxies (CDRSB/MMSE/LogMem) from ML baselines
 
     # ── Logit Adjustment (NeurIPS 2020) & Effective Number of Samples (CVPR 2019) ──
-    USE_LOGIT_ADJUSTMENT = True                  # Fisher-consistent Bayes-optimal minority calibration
-    LOGIT_ADJUST_TAU = 1.0                       # Temperature scaling parameter for log-prior adjustment
-    USE_EFFECTIVE_NUM_SAMPLES = True             # Information-theoretic sample weighting (Cui et al.)
-    EFFECTIVE_NUM_BETA = 0.9999                  # Sample volume redundancy parameter
+    USE_LOGIT_ADJUSTMENT = False                 # Disabled when Effective Samples is active to prevent over-adjustment
+    LOGIT_ADJUST_TAU = 0.1                       # Mild temperature scaling if enabled
+    USE_EFFECTIVE_NUM_SAMPLES = True             # Information-theoretic sample weighting (Cui et al., CVPR 2019)
+    EFFECTIVE_NUM_BETA = 0.999                   # Beta=0.999 yields smooth ~1.56x LMCI weight perfectly fitting 2:1 ratio
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
     USE_DROPEDGE = True                          # Graph data augmentation & over-smoothing prevention

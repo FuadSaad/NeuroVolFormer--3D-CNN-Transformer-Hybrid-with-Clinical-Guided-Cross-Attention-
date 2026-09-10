@@ -53,15 +53,15 @@ _defaults = {
     'T_0': 20,
     'T_MULT': 2,
     'LABEL_SMOOTHING': 0.05,
-    'FOCAL_GAMMA': 2.0,
-    'CUSTOM_CLASS_WEIGHTS': [1.2, 0.8, 0.8, 2.0],
-    'USE_CUSTOM_CLASS_WEIGHTS': True,
-    'USE_COST_SENSITIVE_LOSS': True,
-    'COST_EMCI_LMCI_PENALTY': 2.5,
-    'USE_LOGIT_ADJUSTMENT': True,
-    'LOGIT_ADJUST_TAU': 1.0,
+    'FOCAL_GAMMA': 1.5,
+    'CUSTOM_CLASS_WEIGHTS': [1.0, 1.0, 1.0, 1.0],
+    'USE_CUSTOM_CLASS_WEIGHTS': False,
+    'USE_COST_SENSITIVE_LOSS': False,
+    'COST_EMCI_LMCI_PENALTY': 1.0,
+    'USE_LOGIT_ADJUSTMENT': False,
+    'LOGIT_ADJUST_TAU': 0.1,
     'USE_EFFECTIVE_NUM_SAMPLES': True,
-    'EFFECTIVE_NUM_BETA': 0.9999,
+    'EFFECTIVE_NUM_BETA': 0.999,
     'USE_DROPEDGE': True,
     'DROPEDGE_RATE': 0.15,
     'OUTPUT_DIR': '/kaggle/working/outputs' if os.path.exists('/kaggle') else './outputs',
@@ -124,7 +124,7 @@ class CostSensitiveBalancedFocalLoss(nn.Module):
     def __init__(
         self,
         alpha: Optional[torch.Tensor] = None,
-        gamma: float = 2.0,
+        gamma: float = 1.5,
         label_smoothing: float = 0.05,
         cost_matrix: Optional[torch.Tensor] = None,
         logit_adjustment: Optional[torch.Tensor] = None
@@ -143,17 +143,24 @@ class CostSensitiveBalancedFocalLoss(nn.Module):
                 self.logit_adjustment = self.logit_adjustment.to(inputs.device)
             inputs = inputs + self.logit_adjustment
 
-        # Base Weighted Cross-Entropy with Label Smoothing
-        ce_loss = F.cross_entropy(
+        # 1. Compute unweighted cross-entropy to get true p_t for the focal modulating factor (Lin et al., ICCV 2017)
+        ce_loss_raw = F.cross_entropy(
             inputs, targets,
-            weight=self.alpha,
             label_smoothing=self.label_smoothing,
             reduction='none'
         )
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
+        pt = torch.exp(-ce_loss_raw)
+        focal_weight = (1.0 - pt) ** self.gamma
 
-        # Cost-Sensitive Misclassification Penalty
+        # 2. Apply class importance weights (alpha) linearly (Cui et al., CVPR 2019)
+        if self.alpha is not None:
+            if self.alpha.device != inputs.device:
+                self.alpha = self.alpha.to(inputs.device)
+            loss = self.alpha[targets] * focal_weight * ce_loss_raw
+        else:
+            loss = focal_weight * ce_loss_raw
+
+        # 3. Cost-Sensitive Misclassification Penalty (if configured)
         if self.cost_matrix is not None:
             probs = F.softmax(inputs, dim=-1)
             if self.cost_matrix.device != inputs.device:
@@ -161,12 +168,10 @@ class CostSensitiveBalancedFocalLoss(nn.Module):
 
             # sample_costs[i, c] = cost of predicting class c for ground truth target[i]
             sample_costs = self.cost_matrix[targets] # Shape: (B, num_classes)
-            # Expected cost penalty weighted by predicted class probabilities
             cost_factor = (sample_costs * probs).sum(dim=-1) # Shape: (B,)
-            total_loss = focal_loss * cost_factor
-            return total_loss.mean()
+            loss = loss * cost_factor
 
-        return focal_loss.mean()
+        return loss.mean()
 
 # Backward compatibility alias
 ClassBalancedFocalLoss = CostSensitiveBalancedFocalLoss
@@ -336,16 +341,23 @@ class GNNTrainer:
             cost_matrix[0, 1] = 1.5     # True AD predicted as CN
             cost_matrix[1, 0] = 1.5     # True CN predicted as AD
 
-        # 4. Enable Cost-Sensitive Balanced Focal Loss with Logit Adjustment
-        focal_gamma = getattr(Config, 'FOCAL_GAMMA', 2.0)
+        # 4. Enable Criterion (ClassBalancedFocalLoss or CrossEntropyLoss)
+        use_focal = getattr(Config, 'USE_FOCAL_LOSS', True)
+        focal_gamma = getattr(Config, 'FOCAL_GAMMA', 1.5)
         label_smoothing = getattr(Config, 'LABEL_SMOOTHING', 0.05)
-        self.criterion = CostSensitiveBalancedFocalLoss(
-            alpha=weights_tensor,
-            gamma=focal_gamma,
-            label_smoothing=label_smoothing,
-            cost_matrix=cost_matrix,
-            logit_adjustment=self.logit_adjustment
-        )
+        if use_focal:
+            self.criterion = CostSensitiveBalancedFocalLoss(
+                alpha=weights_tensor,
+                gamma=focal_gamma,
+                label_smoothing=label_smoothing,
+                cost_matrix=cost_matrix,
+                logit_adjustment=self.logit_adjustment
+            )
+        else:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=weights_tensor,
+                label_smoothing=label_smoothing
+            )
 
         # DropEdge Regularization Parameters
         self.use_dropedge = getattr(Config, 'USE_DROPEDGE', True)
