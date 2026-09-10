@@ -16,7 +16,7 @@
 ║    • Relational Interpretability: GAT attention weights reflect learned     ║
 ║      topological message aggregation, not causal biological mechanisms.      ║
 ║    • Surrogate Tree Interpretability: Tabular SHAP/LIME explain tree         ║
-║      surrogate decisions on the 106-D multimodal representation.             ║
+║      surrogate decisions on the 138-D multimodal representation.             ║
 ║    • Zero Target Leakage: Diagnostic proxies (MMSE, CDRSB, LogMem) are       ║
 ║      strictly excluded from all feature attribution manifolds.               ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -67,38 +67,40 @@ def get_interpretable_feature_names(total_dim: int) -> List[str]:
     """
     Generates clinically accurate, publication-ready feature names
     for Deep PCA, Handcrafted Radiomics, and Clinical Demographics.
-    Enforces strict alignment with Config.CLINICAL_FEATURES (Zero Target Leakage).
+    Enforces strict alignment with Config.CLINICAL_FEATURES (Zero Target Leakage)
+    and 138-D multimodal feature schema (64 PCA + 68 Radiomics + 6 Demographics).
     """
     clinical_names = list(getattr(Config, 'CLINICAL_FEATURES', [
         'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
     ]))
     n_clin = len(clinical_names)
 
-    radiomics_base = [
-        'GLCM_Contrast', 'GLCM_Correlation', 'GLCM_Energy', 'GLCM_Homogeneity',
-        'GLCM_Entropy', 'GLCM_Dissimilarity', 'GLRLM_RunLengthNonUniformity',
-        'GLRLM_GrayLevelNonUniformity', 'GLRLM_LongRunEmphasis', 'GLRLM_ShortRunEmphasis',
-        'FirstOrder_Entropy', 'FirstOrder_Mean', 'FirstOrder_Variance',
-        'FirstOrder_Skewness', 'FirstOrder_Kurtosis', 'FirstOrder_Uniformity',
-        'GLSZM_SmallAreaEmphasis', 'GLSZM_LargeAreaEmphasis', 'GLSZM_ZonePercentage',
-        'NGTDM_Coarseness', 'NGTDM_Contrast', 'NGTDM_Busyness'
-    ]
-    radiomics_names = [f"Radiomics_{name}" for name in radiomics_base]
-    while len(radiomics_names) < 68:
-        radiomics_names.append(f"Radiomics_Texture_{len(radiomics_names) + 1}")
+    # Use exact 68 physical radiomics feature names from Section 04B
+    try:
+        from Section_04B_Feature_Extraction import RADIOMICS_FEATURE_NAMES
+        radiomics_names = list(RADIOMICS_FEATURE_NAMES)
+    except Exception:
+        radiomics_base = [
+            'GLCM_Contrast', 'GLCM_Correlation', 'GLCM_Energy', 'GLCM_Homogeneity',
+            'GLCM_Entropy', 'GLCM_Dissimilarity', 'GLRLM_RunLengthNonUniformity',
+            'GLRLM_GrayLevelNonUniformity', 'GLRLM_LongRunEmphasis', 'GLRLM_ShortRunEmphasis',
+            'FirstOrder_Entropy', 'FirstOrder_Mean', 'FirstOrder_Variance',
+            'FirstOrder_Skewness', 'FirstOrder_Kurtosis', 'FirstOrder_Uniformity',
+            'GLSZM_SmallAreaEmphasis', 'GLSZM_LargeAreaEmphasis', 'GLSZM_ZonePercentage',
+            'NGTDM_Coarseness', 'NGTDM_Contrast', 'NGTDM_Busyness'
+        ]
+        radiomics_names = [f"Radiomics_{name}" for name in radiomics_base]
+        while len(radiomics_names) < 68:
+            radiomics_names.append(f"Radiomics_Texture_{len(radiomics_names) + 1}")
 
     pca_dim = getattr(Config, 'PCA_DIM', 64)
-    if total_dim == pca_dim + 68 + n_clin:  # Dynamic PCA fused input
+    expected_full = pca_dim + 68 + n_clin  # Exactly 138
+
+    if total_dim == expected_full:  # Standard 138-D Multimodal Representation
         deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(pca_dim)]
         return deep_names + radiomics_names[:68] + clinical_names
     elif total_dim == pca_dim + 68:
         deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(pca_dim)]
-        return deep_names + radiomics_names[:68]
-    elif total_dim == 32 + 68 + n_clin:  # Fallback 32 PCA fused input
-        deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(32)]
-        return deep_names + radiomics_names[:68] + clinical_names
-    elif total_dim == 100:  # 32 PCA + 68 Radiomics
-        deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(32)]
         return deep_names + radiomics_names[:68]
     elif total_dim >= 1024:
         deep_names = [f"Deep_DenseNet_{i+1:04d}" for i in range(1024)]

@@ -271,19 +271,24 @@ def run_ablation_studies(features_path: str, labels_path: str):
         print(f"==================================================")
 
         ablated_features = get_ablation_features(raw_features, exp['Modality'])
-        if exp.get('MultiScale', True):
-            k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
-            graph_data = build_multiscale_population_graph(ablated_features, labels, k_list=k_list).to(device)
-        else:
-            graph_data = build_population_graph(ablated_features, labels, k=getattr(Config, 'KNN_K', 5)).to(device)
-
+        fold_accs = []
+        fold_f1s = []
         all_labels = []
         all_preds = []
         all_probs = []
         history_fold1 = None
         best_model = None
+        last_graph = None
 
         for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
+            # Strict fold-wise preprocessing & graph construction inside fold loop (Point 4)
+            if exp.get('MultiScale', True):
+                k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
+                graph_data = build_multiscale_population_graph(ablated_features, k_list=k_list, train_indices=train_idx).to(device)
+            else:
+                graph_data = build_population_graph(ablated_features, k=getattr(Config, 'KNN_K', 5), train_indices=train_idx).to(device)
+            graph_data.y = torch.tensor(labels, dtype=torch.long).to(device)
+
             graph_data.train_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
             graph_data.val_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
             graph_data.test_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
@@ -314,40 +319,40 @@ def run_ablation_studies(features_path: str, labels_path: str):
             )
 
             fold_res = trainer.fit()
-            print(f"   Fold {fold_idx+1} Acc: {fold_res['test_acc']*100:.2f}%")
+            f_acc = fold_res.get('val_acc', fold_res.get('best_val_acc', 0.0)) * 100
+            _, _, f_f1, _ = precision_recall_fscore_support(fold_res['val_labels'], fold_res['val_preds'], average='macro', zero_division=0)
+            fold_accs.append(f_acc)
+            fold_f1s.append(f_f1 * 100)
+            print(f"   Fold {fold_idx+1} Val Acc: {f_acc:.2f}% | Val Macro F1: {f_f1*100:.2f}%")
 
             if fold_idx == 0:
                 history_fold1 = fold_res['history']
 
-            all_labels.extend(graph_data.y[test_indices].cpu().numpy())
-            all_preds.extend(fold_res['test_preds'])
-            all_probs.extend(fold_res['test_probs'])
+            all_labels.extend(fold_res['val_labels'])
+            all_preds.extend(fold_res['val_preds'])
+            all_probs.extend(fold_res['val_probs'])
             best_model = trainer.model
+            last_graph = graph_data
 
-        all_labels = np.array(all_labels)
-        all_preds = np.array(all_preds)
-        all_probs = np.array(all_probs)
-
-        # Calculate Comprehensive Metrics
-        acc = (all_preds == all_labels).mean() * 100
-        prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
+        mean_acc = float(np.mean(fold_accs))
+        std_acc = float(np.std(fold_accs))
+        mean_f1 = float(np.mean(fold_f1s))
+        std_f1 = float(np.std(fold_f1s))
 
         master_table.append({
             'Category': exp['Category'],
             'Ablation Model': exp['Name'],
-            'Accuracy': f"{acc:.2f}%",
-            'Precision': f"{prec*100:.2f}%",
-            'Recall': f"{rec*100:.2f}%",
-            'F1-Score': f"{f1*100:.2f}%"
+            'Accuracy': f"{mean_acc:.2f} ± {std_acc:.2f}%",
+            'Macro F1': f"{mean_f1:.2f} ± {std_f1:.2f}%"
         })
 
-        print(f"✅ {exp['Name']} Overall Acc: {acc:.2f}% | F1: {f1*100:.2f}%")
+        print(f"✅ {exp['Name']} Development 5-Fold: Acc = {mean_acc:.2f} ± {std_acc:.2f}% | Macro F1 = {mean_f1:.2f} ± {std_f1:.2f}%")
 
         # Plot Figures for each Ablation
         plot_experiment_learning_curves(history_fold1, exp['Name'])
         plot_experiment_confusion_matrix(all_labels, all_preds, exp['Name'])
         plot_experiment_roc_curve(all_labels, all_probs, exp['Name'])
-        plot_experiment_tsne(best_model, graph_data, exp['Name'], device)
+        plot_experiment_tsne(best_model, last_graph, exp['Name'], device)
 
     # Display and Save Master Ablation Table
     df = pd.DataFrame(master_table)

@@ -109,10 +109,8 @@ class NeuroGATInferenceEngine:
         self.ref_labels = None
         self._load_reference_cohort()
 
-        # Determine feature input dimension: 32 PCA + 68 Radiomics + 6 Demographics = 106-D
-        in_dim = 32 + 68 + len(getattr(Config, 'CLINICAL_FEATURES', [
-            'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
-        ]))  # Default 106-D
+        # Determine feature input dimension: Exactly 64 PCA + 68 Radiomics + 6 Demographics = 138-D
+        in_dim = getattr(Config, 'TOTAL_FEATURE_DIM', 138)
         if self.ref_features is not None:
             in_dim = self.ref_features.shape[1]
 
@@ -120,23 +118,35 @@ class NeuroGATInferenceEngine:
         self._load_checkpoints(checkpoint_path, in_dim)
 
     def _load_reference_cohort(self):
-        """Loads reference population nodes to anchor query patients in the GAT graph."""
+        """Loads reference population nodes to anchor query patients in the GAT graph using frozen training artifacts."""
         f_path = os.path.join(Config.OUTPUT_DIR, 'node_features.npy')
         l_path = os.path.join(Config.OUTPUT_DIR, 'node_labels.npy')
+        pca_path = os.path.join(Config.OUTPUT_DIR, 'results', 'final_pca.joblib')
+
+        try:
+            import joblib
+        except ImportError:
+            joblib = None
 
         if os.path.exists(f_path) and os.path.exists(l_path):
             try:
                 raw_feat = np.load(f_path)
                 self.ref_labels = np.load(l_path)
 
-                # Apply standard PCA reduction if raw 1024-D
+                # Point 12: Load frozen training PCA if available; never fit at inference!
                 if raw_feat.shape[1] >= 1024:
-                    pca_dim = getattr(Config, 'PCA_DIM', 64)
-                    pca = PCA(n_components=pca_dim, random_state=42)
-                    deep_pca = pca.fit_transform(raw_feat[:, :1024])
+                    if joblib and os.path.exists(pca_path):
+                        print(f"📦 Loading frozen training PCA from {pca_path}")
+                        pca = joblib.load(pca_path)
+                        deep_pca = pca.transform(raw_feat[:, :1024])
+                    else:
+                        pca_dim = getattr(Config, 'PCA_DIM', 64)
+                        pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
+                        deep_pca = pca.fit_transform(raw_feat[:, :1024])
                     self.ref_features = np.concatenate([deep_pca, raw_feat[:, 1024:]], axis=1)
                 else:
                     self.ref_features = raw_feat
+
                 print(f"✅ Loaded reference cohort: {self.ref_features.shape[0]} patients, {self.ref_features.shape[1]} features.")
             except Exception as e:
                 print(f"⚠️ Could not load reference cohort: {e}")
@@ -168,10 +178,13 @@ class NeuroGATInferenceEngine:
                             loaded_realpaths.add(rp)
                             break
         else:
-            # Single top performing model
+            # Single top performing model (Stage 2 final retraining checkpoint prioritized)
             single_candidates = [
+                os.path.join(ckpt_dir, 'neurogat_final_model.pt'),
                 os.path.join(ckpt_dir, 'neurogat_best_model.pt'),
+                os.path.join('/kaggle/working/checkpoints', 'neurogat_final_model.pt'),
                 os.path.join('/kaggle/working/checkpoints', 'neurogat_best_model.pt'),
+                'checkpoints/neurogat_final_model.pt',
                 'checkpoints/neurogat_best_model.pt',
                 os.path.join(ckpt_dir, 'fold0_best.pt'),
             ]
@@ -200,7 +213,11 @@ class NeuroGATInferenceEngine:
         if self.models:
             print(f"✅ NeuroGAT Inference Engine online with {len(self.models)} model instance(s).")
         else:
-            print("⚠️ No trained checkpoint found. Operating in synthetic simulation mode.")
+            raise RuntimeError(
+                "❌ No trained NeuroGAT model checkpoints found!\n"
+                "Please train the model (Section 06) first to generate checkpoints before running clinical inference.\n"
+                "Heuristic rule-based fallbacks are strictly prohibited under Q1 protocol."
+            )
 
     def _prepare_patient_feature_vector(
         self,
@@ -286,28 +303,16 @@ class NeuroGATInferenceEngine:
         all_probs = []
         all_cog_scores = []
 
-        if self.models:
-            for model in self.models:
-                logits, cog_pred = model(x_tensor, edge_index, edge_attr=edge_attr, return_aux=True)
-                prob = F.softmax(logits[query_idx:query_idx+1], dim=1).cpu().numpy()[0]
+        for model in self.models:
+            logits, cog_pred = model(x_tensor, edge_index, edge_attr=edge_attr, return_aux=True)
+            prob = F.softmax(logits[query_idx:query_idx+1], dim=1).cpu().numpy()[0]
+            if cog_pred is not None:
                 cog = cog_pred[query_idx:query_idx+1].cpu().numpy().squeeze()
-                all_probs.append(prob)
                 all_cog_scores.append(float(cog))
+            all_probs.append(prob)
 
-            mean_probs = np.mean(all_probs, axis=0)
-            mean_cog = float(np.mean(all_cog_scores))
-        else:
-            # Heuristic simulation if checkpoints pending
-            mmse = float(clinical_dict.get('MMSE', 27.0))
-            if mmse <= 19:
-                mean_probs = np.array([0.82, 0.03, 0.05, 0.10])
-            elif mmse <= 23:
-                mean_probs = np.array([0.15, 0.05, 0.20, 0.60])
-            elif mmse <= 26:
-                mean_probs = np.array([0.05, 0.15, 0.65, 0.15])
-            else:
-                mean_probs = np.array([0.02, 0.88, 0.08, 0.02])
-            mean_cog = (30.0 - mmse) / 30.0
+        mean_probs = np.mean(all_probs, axis=0)
+        mean_cog = float(np.mean(all_cog_scores)) if all_cog_scores else 0.0
 
         pred_idx = int(np.argmax(mean_probs))
         pred_class = Config.IDX_TO_CLASS[pred_idx]
@@ -337,44 +342,44 @@ class NeuroGATInferenceEngine:
             'predicted_mmse': predicted_mmse,
             'vulnerability_score': risk_score,
             'vulnerability_stratum': risk_stratum,
-            'conversion_risk_score': risk_score,
-            'conversion_risk_stratum': risk_stratum,
             'recommendations': recommendations,
             'visualization_image': viz_image
         }
 
     def _generate_recommendations(self, pred_class: str, risk_score: float, pred_mmse: float) -> List[str]:
-        """Evidence-based clinical recommendations based on stage and conversion trajectory."""
+        """Evidence-based clinical decision support guidance based on predicted disease stage."""
+        advisory = "⚠️ Research Prototype Advisory: This software is designed exclusively for exploratory academic research and algorithmic benchmarking. It is NOT an approved medical diagnostic or therapeutic device. All diagnostic interpretations and care plans must be established by a board-certified neurologist or qualified healthcare practitioner."
+
         if pred_class == 'AD':
             return [
-                "Immediate comprehensive neurological assessment recommended.",
-                "Review FDA-approved anti-amyloid monoclonal antibody therapy eligibility.",
-                "Initiate cognitive stabilization pharmacological protocol (Cholinesterase Inhibitors / Memantine).",
-                "Recommend amyloid PET or CSF biomarker confirmation (Aβ42/40 ratio, p-tau181).",
-                "Establish structured caregiver support and advanced clinical care directives."
+                advisory,
+                "Recommended: Urgent comprehensive neurological assessment and multidisciplinary clinical review.",
+                "Cognitive Tracking: Formal neuropsychological battery assessment (MoCA/MMSE serial tracking).",
+                "Advanced Biomarker Confirmation: Consult specialist regarding CSF amyloid/tau or molecular PET imaging.",
+                "Support Directives: Establish coordinated caregiver resources and supportive clinical directives."
             ]
         elif pred_class == 'LMCI':
             return [
-                f"High-vigilance monitoring protocol: scheduled 3-month neuropsychological reassessment (Progression Vulnerability: {risk_score:.1f}%).",
-                "Evaluate eligibility for disease-modifying early-stage AD clinical trials.",
-                "Conduct volumetric MRI follow-up at 6 months to measure hippocampal atrophy rate.",
-                "Target vascular risk factors: blood pressure (<130 mmHg) and lipid management.",
-                "Implement structured aerobic exercise and Mediterranean-DASH intervention for neurodegenerative delay (MIND diet)."
+                advisory,
+                f"High-Vigilance Monitoring: Scheduled 3-to-6 month neuropsychological reassessment (Progression Vulnerability: {risk_score:.1f}%).",
+                "Imaging Surveillance: High-resolution volumetric MRI follow-up to measure hippocampal atrophy progression.",
+                "Modifiable Risk Optimization: Strict vascular risk factor management (blood pressure, lipid profiles, glycemic control).",
+                "Lifestyle Enrichment: Supervised aerobic exercise, structured sleep hygiene, and cognitive engagement protocols."
             ]
         elif pred_class == 'EMCI':
             return [
-                "Biannual cognitive monitoring (MMSE / MoCA batteries).",
-                "Comprehensive neuropsychological baseline profiling for memory retention and executive function.",
-                "Lifestyle risk factor mitigation: targeted sleep hygiene, aerobic fitness, and cognitive enrichment.",
-                "Baseline structural MRI tracking to establish individual atrophy trajectory.",
-                "Consider genetic risk counseling (APOE ε4 allele screening if family history is positive)."
+                advisory,
+                "Periodic Surveillance: Annual to biannual clinical monitoring and memory assessment.",
+                "Baseline Profiling: Comprehensive baseline cognitive profiling to establish individual longitudinal trajectory.",
+                "Preventive Interventions: Targeted cardiovascular health optimization and structured mental activities.",
+                "Genetic / Family History Assessment: Discuss family medical history with a clinical genetic counselor."
             ]
         else:  # CN
             return [
-                "Patient profile aligns with Cognitively Normal (CN) age-matched cohort.",
-                "Routine preventive wellness checkup in 12-24 months.",
-                "Maintain active physical and intellectual engagements.",
-                "Sustain cardiovascular and metabolic health management."
+                advisory,
+                "Patient profile demonstrates strong topological alignment with Cognitively Normal (CN) reference cohort.",
+                "Routine Preventive Care: Standard age-appropriate health maintenance and periodic wellness follow-ups.",
+                "Cognitive Resilience: Encourage continued active intellectual, social, and physical engagements."
             ]
 
     def _render_clinical_dashboard(
@@ -463,9 +468,8 @@ class NeuroGATInferenceEngine:
                 'P(EMCI)': f"{res['probabilities']['EMCI']*100:.1f}%",
                 'P(LMCI)': f"{res['probabilities']['LMCI']*100:.1f}%",
                 'Predicted_MMSE': res['predicted_mmse'],
-                'Progression_Vulnerability': f"{res['conversion_risk_score']:.1f}%",
-                '24M_Conversion_Risk': f"{res['conversion_risk_score']:.1f}%",
-                'Risk_Stratum': res['conversion_risk_stratum']
+                'Progression_Vulnerability_Score': f"{res['vulnerability_score']:.1f}%",
+                'Vulnerability_Stratum': res['vulnerability_stratum']
             })
 
         res_df = pd.concat([df.reset_index(drop=True), pd.DataFrame(results)], axis=1)

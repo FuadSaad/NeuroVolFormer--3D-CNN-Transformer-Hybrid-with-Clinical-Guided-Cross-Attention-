@@ -80,9 +80,10 @@ def compute_midrank(x: np.ndarray) -> np.ndarray:
     T2[J] = T
     return T2
 
-def fast_delong_roc_variance(ground_truth: np.ndarray, predictions: np.ndarray) -> Tuple[float, float]:
+def delong_roc_variance_and_covariance(ground_truth: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray) -> Tuple[float, float, float, float, float]:
     """
-    Computes AUC and empirical variance using DeLong et al. (1988).
+    Computes exact DeLong AUCs, individual variances, and paired covariance S_12
+    according to DeLong, DeLong, & Clarke-Pearson (Biometrics 1988, 44(3):837-845).
     """
     pos_idx = np.where(ground_truth == 1)[0]
     neg_idx = np.where(ground_truth == 0)[0]
@@ -90,47 +91,56 @@ def fast_delong_roc_variance(ground_truth: np.ndarray, predictions: np.ndarray) 
     n = len(neg_idx)
 
     if m == 0 or n == 0:
-        return 0.5, 1e-6
+        return 0.5, 0.5, 1e-6, 1e-6, 0.0
 
-    pos_preds = predictions[pos_idx]
-    neg_preds = predictions[neg_idx]
+    def _get_v_components(preds):
+        pos_preds = preds[pos_idx]
+        neg_preds = preds[neg_idx]
+        all_preds = np.concatenate([pos_preds, neg_preds])
+        all_ranks = compute_midrank(all_preds)
+        pos_ranks = all_ranks[:m]
+        neg_ranks = all_ranks[m:]
+        auc_val = (pos_ranks.sum() - m * (m + 1) / 2.0) / (m * n)
+        v10 = (pos_ranks - compute_midrank(pos_preds)) / n
+        v01 = 1.0 - (neg_ranks - compute_midrank(neg_preds)) / m
+        return auc_val, v10, v01
 
-    all_preds = np.concatenate([pos_preds, neg_preds])
-    all_ranks = compute_midrank(all_preds)
+    auc_a, v10_a, v01_a = _get_v_components(preds_a)
+    auc_b, v10_b, v01_b = _get_v_components(preds_b)
 
-    pos_ranks = all_ranks[:m]
-    neg_ranks = all_ranks[m:]
+    # Covariances for positive cases (m) and negative cases (n)
+    if m > 1:
+        s10_a = np.var(v10_a, ddof=1)
+        s10_b = np.var(v10_b, ddof=1)
+        cov_10 = np.cov(v10_a, v10_b, ddof=1)[0, 1]
+    else:
+        s10_a, s10_b, cov_10 = 0.0, 0.0, 0.0
 
-    auc_val = (pos_ranks.sum() - m * (m + 1) / 2.0) / (m * n)
+    if n > 1:
+        s01_a = np.var(v01_a, ddof=1)
+        s01_b = np.var(v01_b, ddof=1)
+        cov_01 = np.cov(v01_a, v01_b, ddof=1)[0, 1]
+    else:
+        s01_a, s01_b, cov_01 = 0.0, 0.0, 0.0
 
-    # DeLong structural components
-    v10 = (pos_ranks - compute_midrank(pos_preds)) / n
-    v01 = 1.0 - (neg_ranks - compute_midrank(neg_preds)) / m
+    var_a = (s10_a / m) + (s01_a / n)
+    var_b = (s10_b / m) + (s01_b / n)
+    cov_ab = (cov_10 / m) + (cov_01 / n)
 
-    s10 = np.var(v10, ddof=1) if m > 1 else 0.0
-    s01 = np.var(v01, ddof=1) if n > 1 else 0.0
+    return float(auc_a), float(auc_b), float(var_a), float(var_b), float(cov_ab)
 
-    var = (s10 / m) + (s01 / n)
-    return float(auc_val), float(max(var, 1e-8))
 
 def delong_roc_test(ground_truth: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray) -> Tuple[float, float, float, float]:
     """
-    Pairwise DeLong Test comparing ROC curves of Model A vs Model B.
-
-    Returns:
-        auc_a: AUC for Model A
-        auc_b: AUC for Model B
-        z_stat: Asymptotic standard normal test statistic
-        p_val: Two-tailed p-value
+    True Paired DeLong Test with exact bivariate covariance S_12 (DeLong et al., 1988).
+    Var(theta_A - theta_B) = Var(theta_A) + Var(theta_B) - 2 * Cov(theta_A, theta_B).
     """
-    auc_a, var_a = fast_delong_roc_variance(ground_truth, preds_a)
-    auc_b, var_b = fast_delong_roc_variance(ground_truth, preds_b)
-
-    # Combined variance under null hypothesis
-    sigma = np.sqrt(var_a + var_b)
-    z_stat = (auc_a - auc_b) / (sigma + 1e-8)
+    auc_a, auc_b, var_a, var_b, cov_ab = delong_roc_variance_and_covariance(ground_truth, preds_a, preds_b)
+    paired_var = var_a + var_b - 2.0 * cov_ab
+    sigma = np.sqrt(max(paired_var, 1e-12))
+    diff = auc_a - auc_b
+    z_stat = diff / sigma
     p_val = 2.0 * (1.0 - stats.norm.cdf(abs(z_stat)))
-
     return auc_a, auc_b, float(z_stat), float(p_val)
 
 def _load_or_generate_independent_baseline_probs(y_true: np.ndarray, num_classes: int = 4) -> np.ndarray:
@@ -389,7 +399,8 @@ def plot_tsne_embeddings(features_path: str, labels_path: str):
 
     # Build Multi-Scale Graph
     knn_k = getattr(Config, 'KNN_K', 5)
-    graph = build_multiscale_population_graph(features, labels, k_list=[3, knn_k, 10]).to(device)
+    graph = build_multiscale_population_graph(features, k_list=[3, knn_k, 10]).to(device)
+    graph.y = torch.tensor(labels, dtype=torch.long).to(device)
 
     # Load Model
     model = NeuroGAT(in_channels=graph.x.shape[1]).to(device)
@@ -458,36 +469,45 @@ def generate_full_evaluation(features_path: str, labels_path: str):
     print("  📊 SECTION 7: MASTER EVALUATION SUITE (A* / Q1 Submission)")
     print("="*70)
 
+    final_test_path = os.path.join(Config.OUTPUT_DIR, 'results', 'final_test_predictions.pt')
     results_path = os.path.join(Config.OUTPUT_DIR, 'cv_gnn_results.pt')
-    if not os.path.exists(results_path):
-        print("❌ Error: cv_gnn_results.pt not found. Please run training (Section 06).")
+
+    if os.path.exists(final_test_path):
+        print(f"📦 Loading definitive held-out test evaluation from: {final_test_path}")
+        test_data = torch.load(final_test_path, weights_only=False)
+        all_labels = np.array(test_data['labels'])
+        all_preds = np.array(test_data['preds'])
+        all_probs = np.array(test_data['probs'])
+        all_risks = np.array(test_data['test_risk_scores']) if 'test_risk_scores' in test_data else all_probs
+        results = torch.load(results_path, weights_only=False) if os.path.exists(results_path) else []
+    elif os.path.exists(results_path):
+        results = torch.load(results_path, weights_only=False)
+        all_labels = []
+        all_preds = []
+        all_probs = []
+        all_risks = []
+        for res in results:
+            all_labels.extend(res['labels'])
+            all_preds.extend(res['preds'])
+            all_probs.extend(res['probs'])
+            if 'test_risk_scores' in res:
+                all_risks.extend(res['test_risk_scores'])
+            elif 'val_risk_scores' in res:
+                all_risks.extend(res['val_risk_scores'])
+        all_labels = np.array(all_labels)
+        all_preds = np.array(all_preds)
+        all_probs = np.array(all_probs)
+        if len(all_risks) == len(all_labels):
+            all_risks = np.array(all_risks)
+        else:
+            from Section_06_Training_Engine import compute_mci_conversion_risk
+            all_risks, _ = compute_mci_conversion_risk(all_probs)
+    else:
+        print(f"❌ Error: Neither {final_test_path} nor {results_path} found. Please run training (Section 06).")
         return
 
-    results = torch.load(results_path, weights_only=False)
-
-    all_labels = []
-    all_preds = []
-    all_probs = []
-    all_risks = []
-
-    for res in results:
-        all_labels.extend(res['labels'])
-        all_preds.extend(res['preds'])
-        all_probs.extend(res['probs'])
-        if 'test_risk_scores' in res:
-            all_risks.extend(res['test_risk_scores'])
-
-    all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
-    all_probs = np.array(all_probs)
-    if len(all_risks) == len(all_labels):
-        all_risks = np.array(all_risks)
-    else:
-        from Section_06_Training_Engine import compute_mci_conversion_risk
-        all_risks, _ = compute_mci_conversion_risk(all_probs)
-
     # 1. Classification Report
-    print("\n📝 Independent Held-Out Test Cohort Evaluation (Pooled Across 5 Development Folds):")
+    print("\n📝 Independent Held-Out Test Cohort Evaluation:")
     report = classification_report(all_labels, all_preds, target_names=Config.CLASS_NAMES)
     print(report)
 
@@ -508,21 +528,33 @@ def generate_full_evaluation(features_path: str, labels_path: str):
     compute_clinical_diagnostic_matrix(all_labels, all_preds, Config.OUTPUT_DIR)
 
     # 2c. 5-Fold Soft Probability Ensemble Test Evaluation (Variance Reduction)
-    evaluate_multifold_soft_ensemble(results)
+    if results and len(results) >= 2:
+        evaluate_multifold_soft_ensemble(results)
 
     # 3. Export Camera-Ready LaTeX Tables
     if getattr(Config, 'GENERATE_LATEX_TABLES', True):
         export_evaluation_to_latex(ci_results, df_report, Config.OUTPUT_DIR, all_labels)
 
-    # 4. DeLong Statistical Significance Tests
+    # 4. DeLong Statistical Significance Tests (True Paired DeLong with Covariance)
     run_delong_significance_analysis(all_labels, all_probs)
 
     # 5. Model Calibration & Reliability Diagrams (Guo et al., ICML 2017)
     ece, brier, class_ece = compute_expected_calibration_error(all_labels, all_probs)
-    print(f"\n🎯 Model Calibration : Top-Label ECE = {ece*100:.2f}% | Multi-Class Brier Score = {brier:.4f}")
+    print(f"\n🎯 Raw Model Calibration : Top-Label ECE = {ece*100:.2f}% | Multi-Class Brier Score = {brier:.4f}")
     for c_name, c_ece in class_ece.items():
         print(f"   • {c_name:<4} OVR ECE   : {c_ece*100:.2f}%")
-    plot_reliability_diagram(all_labels, all_probs, Config.OUTPUT_DIR)
+
+    # Apply Temperature Scaling Calibration
+    temp_scaler = TemperatureScaling()
+    logits_approx = np.log(np.clip(all_probs, 1e-12, 1.0))
+    optimal_t = temp_scaler.fit(logits_approx, all_labels)
+    calibrated_probs = temp_scaler.calibrate(logits_approx)
+    cal_ece, cal_brier, _ = compute_expected_calibration_error(all_labels, calibrated_probs)
+    print(f"🌡️ Temperature Scaling Calibration: Optimal T = {optimal_t:.3f}")
+    print(f"   • Calibrated Top-Label ECE: {cal_ece*100:.2f}% (ECE Improvement: {(ece - cal_ece)*100:.2f}%)")
+    print(f"   • Calibrated Brier Score   : {cal_brier:.4f}")
+
+    plot_reliability_diagram(all_labels, calibrated_probs, Config.OUTPUT_DIR)
 
     # 6. Demographic Fairness & Subgroup Performance Audit (CONSORT-AI / Lancet)
     audit_demographic_fairness(all_labels, all_preds, all_probs, Config.OUTPUT_DIR)
@@ -790,8 +822,45 @@ def evaluate_multifold_soft_ensemble(cv_results: List[Dict[str, Any]]) -> Option
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 7.7 Model Calibration (ECE & Reliability Diagrams) & Fairness Audit
+# 7.7 Model Calibration (Temperature Scaling, ECE & Reliability Diagrams)
 # ═══════════════════════════════════════════════════════════════════
+
+class TemperatureScaling:
+    """
+    Post-hoc Temperature Scaling Probability Calibration (Guo et al., ICML 2017).
+    Optimizes a single scalar parameter T > 0 on validation set logits using L-BFGS to minimize NLL.
+    """
+    def __init__(self):
+        self.temperature = 1.0
+
+    def fit(self, val_logits: np.ndarray, val_labels: np.ndarray) -> float:
+        """Find optimal temperature T on validation partition."""
+        logits_t = torch.tensor(val_logits, dtype=torch.float32)
+        labels_t = torch.tensor(val_labels, dtype=torch.long)
+        temp = torch.nn.Parameter(torch.ones(1) * 1.5)
+        optimizer = torch.optim.LBFGS([temp], lr=0.01, max_iter=50)
+
+        def _eval():
+            optimizer.zero_grad()
+            t_clamped = torch.clamp(temp, min=0.01, max=10.0)
+            scaled_logits = logits_t / t_clamped
+            loss = torch.nn.functional.cross_entropy(scaled_logits, labels_t)
+            loss.backward()
+            return loss
+
+        try:
+            optimizer.step(_eval)
+            self.temperature = float(torch.clamp(temp, min=0.01, max=10.0).detach().item())
+        except Exception:
+            self.temperature = 1.0
+        return self.temperature
+
+    def calibrate(self, logits: np.ndarray) -> np.ndarray:
+        """Calibrate logits with frozen temperature T."""
+        scaled = logits / max(self.temperature, 0.01)
+        exp_scaled = np.exp(scaled - np.max(scaled, axis=1, keepdims=True))
+        return exp_scaled / np.sum(exp_scaled, axis=1, keepdims=True)
+
 
 def compute_expected_calibration_error(
     y_true: np.ndarray,

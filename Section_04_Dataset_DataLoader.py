@@ -6,6 +6,19 @@
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+import os
+import sys
+import random
+from typing import Tuple, List, Dict, Optional, Any
+import numpy as np
+import scipy.ndimage as ndimage
+import pandas as pd
+import torch
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+
+from Section_01_Setup_Configuration import Config, SEED, set_seed
+
 # ═══════════════════════════════════════════════════════════════════
 # 4.1 3D Data Augmentation
 # ═══════════════════════════════════════════════════════════════════
@@ -154,9 +167,10 @@ class ADNIDataset(Dataset):
             data = np.load(self.file_paths[idx])
             volume = data['volume'].astype(np.float32)
         except Exception as e:
-            # Explicit warning log for transparency and data integrity tracking
-            print(f"⚠️ Warning: Could not load volume at index {idx} ({self.file_paths[idx]}): {e}. Supplying zero-volume fallback.")
-            volume = np.zeros(Config.INPUT_SIZE, dtype=np.float32)
+            raise RuntimeError(
+                f"❌ Data Integrity Failure: Could not load preprocessed volume at index {idx} "
+                f"({self.file_paths[idx]}): {e}. Zero-volume fallback is strictly prohibited under Q1 protocol."
+            )
 
         # Apply augmentation
         if self.transform is not None:
@@ -450,6 +464,19 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     file_df = processed_df[processed_df['preprocess_success'] == True].reset_index(drop=True)
     print(f"\n📊 Working with {len(file_df)} successfully preprocessed volumes")
 
+    # Upfront file verification (Point 26: Eliminates missing/corrupted volumes prior to splitting)
+    if 'preprocessed_path' in file_df.columns:
+        valid_mask = [os.path.exists(p) if isinstance(p, str) else False for p in file_df['preprocessed_path']]
+        if not all(valid_mask):
+            n_missing = len(valid_mask) - sum(valid_mask)
+            print(f"⚠️ Upfront Integrity Check: {n_missing} preprocessed files missing on disk. Pruning from active cohort.")
+            file_df = file_df[valid_mask].reset_index(drop=True)
+        else:
+            print(f"✅ Upfront Integrity Check: All {len(file_df)} preprocessed volume paths verified on disk.")
+
+    total_raw_scans = len(processed_df)
+    preprocessed_scans = len(file_df)
+
     # ── MERGE CLINICAL FEATURES ──
     clinical_csv = Config.CLINICAL_CSV
     if clinical_csv and os.path.exists(clinical_csv):
@@ -467,6 +494,7 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
         print(f"⚠️ Clinical CSV not found at {clinical_csv}! Clinical features will be missing.")
 
     # Step 0: Participant-Level Cohort De-duplication (Chronological Baseline Selection)
+    excluded_longitudinal = 0
     if getattr(Config, 'ONE_SCAN_PER_SUBJECT', True):
         initial_count = len(file_df)
 
@@ -506,6 +534,7 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
             file_df = file_df.sort_values(sort_col).drop_duplicates('subject_id', keep='first').reset_index(drop=True)
             method_desc = f"subject indexing fallback"
 
+        excluded_longitudinal = initial_count - len(file_df)
         print("\n" + "-" * 50)
         print("  Step 0: Participant-Level Cohort De-duplication (Chronological Baseline)")
         print("-" * 50)
@@ -526,6 +555,21 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     # Fit strictly on development cohort (train + val) without touching held-out test cohort
     train_val_indices = [i for i in range(len(file_df)) if i not in set(test_indices)]
     clinical_features, scaler = prepare_clinical_features(file_df, train_val_indices)
+
+    # ── CONSORT Cohort Flow Diagram Artifact (Point 25) ──
+    consort_records = [
+        {"Stage": "1. Total Initial Acquisitions", "Count": total_raw_scans, "Details": "All candidate T1-weighted MPRAGE scans"},
+        {"Stage": "2. Preprocessing & Quality Control", "Count": preprocessed_scans, "Details": "Anterior-commissure aligned, 128x128x128 resampled, N4 bias corrected"},
+        {"Stage": "3. Longitudinal Scans Excluded", "Count": excluded_longitudinal, "Details": "Follow-up exams pruned to prevent within-subject pseudo-replication"},
+        {"Stage": "4. Final Baseline Cohort (Unique Patients)", "Count": len(file_df), "Details": "Exactly 1 chronological baseline scan per participant"},
+        {"Stage": "5. Development Cohort (CV Folds)", "Count": len(train_val_indices), "Details": "80% partition for 5-fold cross-validation & model selection"},
+        {"Stage": "6. Independent Held-Out Test Cohort", "Count": len(test_indices), "Details": "20% locked held-out partition evaluated strictly once"}
+    ]
+    consort_df = pd.DataFrame(consort_records)
+    consort_path = os.path.join(Config.OUTPUT_DIR, 'results', 'consort_cohort_flow.csv')
+    os.makedirs(os.path.dirname(consort_path), exist_ok=True)
+    consort_df.to_csv(consort_path, index=False)
+    print(f"📋 Exported CONSORT Cohort Flow Table to: {consort_path}")
 
     # Step 3: Visualize splits
     print("\n" + "-" * 50)

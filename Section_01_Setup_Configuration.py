@@ -217,6 +217,11 @@ class Config:
     DEEP_FEATURE_DIM = 1024       # Dimension from 3D MONAI DenseNet121
     PCA_DIM = 64                  # Preserves 64 principal components of 3D spatial variance
     RADIOMICS_FEATURE_DIM = 68    # Standard PyRadiomics texture feature count
+    REQUIRE_PRETRAINED_CNN = True # Enforce verified biomedical pretrained weights (MONAI / MedicalNet)
+    PRETRAINED_CNN_WEIGHTS = find_kaggle_path(
+        ['medicalnet_resnet', 'densenet_pretrained', 'monai_densenet', 'densenet121', 'monai'],
+        default=""
+    )
 
     # ── Graph Neural Network (NeuroGAT A* Edition) ──
     KNN_K = 5                     # Meso-scale neighborhood
@@ -235,7 +240,8 @@ class Config:
     DIAGNOSTIC_PROXIES = ['CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate']
     INCLUDE_DIAGNOSTIC_PROXIES = False  # False: eliminates circular diagnostic proxy leakage
     CLINICAL_FEATURES = CLINICAL_DEMOGRAPHICS if not INCLUDE_DIAGNOSTIC_PROXIES else (DIAGNOSTIC_PROXIES + CLINICAL_DEMOGRAPHICS)
-    CLINICAL_DIM = len(CLINICAL_FEATURES)
+    CLINICAL_DIM = len(CLINICAL_FEATURES)  # Exactly 6
+    TOTAL_FEATURE_DIM = PCA_DIM + RADIOMICS_FEATURE_DIM + CLINICAL_DIM  # Exactly 138 (64 + 68 + 6)
 
     FEATURE_SCHEMA = {
         'deep_mri': '3D DenseNet-121 / Native 3D CNN (1024-D -> PCA 64-D)',

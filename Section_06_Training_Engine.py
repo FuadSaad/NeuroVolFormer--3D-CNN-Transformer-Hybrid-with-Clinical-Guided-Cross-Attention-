@@ -40,30 +40,31 @@ _defaults = {
     'KNN_K_LIST': [3, 5, 10],
     'GAT_HIDDEN_DIM': 128,
     'GAT_HEADS': 4,
-    'GAT_DROPOUT': 0.3,
-    'CLASSIFIER_DROPOUT': 0.4,
-    'L2_REGULARIZATION': 5e-4,
-    'AUX_COG_WEIGHT': 0.1,
+    'GAT_DROPOUT': 0.15,
+    'CLASSIFIER_DROPOUT': 0.20,
+    'L2_REGULARIZATION': 1e-4,
+    'AUX_COG_WEIGHT': 0.0,
     'BATCH_SIZE': 1,
-    'EPOCHS': 300,
-    'PATIENCE': 50,
+    'EPOCHS': 200,
+    'PATIENCE': 40,
     'LEARNING_RATE': 5e-4,
-    'WEIGHT_DECAY': 0.01,
+    'WEIGHT_DECAY': 1e-4,
     'BETAS': (0.9, 0.999),
-    'T_0': 20,
+    'T_0': 25,
     'T_MULT': 2,
     'LABEL_SMOOTHING': 0.05,
-    'FOCAL_GAMMA': 1.5,
+    'FOCAL_GAMMA': 1.0,
+    'USE_FOCAL_LOSS': False,
     'CUSTOM_CLASS_WEIGHTS': [1.0, 1.0, 1.0, 1.0],
     'USE_CUSTOM_CLASS_WEIGHTS': False,
     'USE_COST_SENSITIVE_LOSS': False,
     'COST_EMCI_LMCI_PENALTY': 1.0,
     'USE_LOGIT_ADJUSTMENT': False,
     'LOGIT_ADJUST_TAU': 0.1,
-    'USE_EFFECTIVE_NUM_SAMPLES': True,
+    'USE_EFFECTIVE_NUM_SAMPLES': False,
     'EFFECTIVE_NUM_BETA': 0.999,
-    'USE_DROPEDGE': True,
-    'DROPEDGE_RATE': 0.15,
+    'USE_DROPEDGE': False,
+    'DROPEDGE_RATE': 0.0,
     'OUTPUT_DIR': '/kaggle/working/outputs' if os.path.exists('/kaggle') else './outputs',
     'CHECKPOINT_DIR': '/kaggle/working/checkpoints' if os.path.exists('/kaggle') else './checkpoints',
     'FIGURES_DIR': '/kaggle/working/outputs/figures' if os.path.exists('/kaggle') else './outputs/figures',
@@ -272,10 +273,7 @@ class GNNTrainer:
         self.graph = graph_data.to(device)
         self.fold_idx = fold_idx
         self.device = device
-        self.lambda_cog = getattr(Config, 'AUX_COG_WEIGHT', 0.02)  # Auxiliary cognitive task loss weight (calibrated)
-
-        # Clinical cognitive impairment severity prior (0: AD, 1: CN, 2: EMCI, 3: LMCI)
-        self.severity_prior = torch.tensor([0.85, 0.10, 0.35, 0.65], dtype=torch.float32).to(device)
+        self.lambda_cog = getattr(Config, 'AUX_COG_WEIGHT', 0.0)  # Default 0.0: pure classification mode
 
         # Initialize NeuroGAT model
         self.model = NeuroGAT(in_channels=self.graph.x.shape[1]).to(device)
@@ -383,10 +381,15 @@ class GNNTrainer:
         self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': [], 'val_mae': []}
 
     def _get_cognitive_target(self) -> torch.Tensor:
-        """Retrieves ground truth or clinical stage prior for continuous cognitive severity."""
+        """Retrieves ground truth continuous cognitive severity (MMSE/CDR-SB)."""
         if hasattr(self.graph, 'cog_y') and self.graph.cog_y is not None:
             return self.graph.cog_y
-        return self.severity_prior[self.graph.y].unsqueeze(1)
+        if self.lambda_cog > 0.0:
+            raise RuntimeError(
+                "❌ Real continuous cognitive score targets (e.g. MMSE / CDR-SB) required for auxiliary regression. "
+                "Deterministic categorical label projection priors are strictly prohibited under Q1 protocol."
+            )
+        return torch.zeros((self.graph.x.shape[0], 1), device=self.device)
 
     def train_epoch(self) -> Tuple[float, float]:
         self.model.train()
@@ -528,12 +531,12 @@ class GNNTrainer:
                 print(f"⏹️ Early stopping triggered at epoch {epoch} (Validation loss halted improving)")
                 break
 
-        # Load best model weights for test evaluation
+        # Load best model weights for validation evaluation (Zero Test Leakage)
         best_checkpoint = torch.load(best_ckpt_path, weights_only=False)
         self.model.load_state_dict(best_checkpoint['model_state_dict'])
 
-        test_loss, test_acc, test_mae, test_preds, test_probs, test_cog, test_risk, test_strata = self.evaluate(self.graph.test_mask)
-        test_labels = self.graph.y[self.graph.test_mask].cpu().numpy()
+        val_loss, val_acc, val_mae, val_preds, val_probs, val_cog, val_risk, val_strata = self.evaluate(self.graph.val_mask)
+        val_labels = self.graph.y[self.graph.val_mask].cpu().numpy()
 
         # Plot Fold Learning Curve
         self._plot_learning_curve()
@@ -541,20 +544,28 @@ class GNNTrainer:
         return {
             'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
-            'test_acc': test_acc,
-            'test_loss': test_loss,
-            'test_mae': test_mae,
-            'test_preds': test_preds,
-            'test_probs': test_probs,
-            'test_labels': test_labels,
-            'test_cog_preds': test_cog,
-            'test_risk_scores': test_risk,
-            'test_risk_strata': test_strata,
-            'labels': test_labels,
-            'preds': test_preds,
-            'probs': test_probs,
+            'val_acc': val_acc,
+            'val_loss': val_loss,
+            'val_mae': val_mae,
+            'val_preds': val_preds,
+            'val_probs': val_probs,
+            'val_labels': val_labels,
+            'val_cog_preds': val_cog,
+            'val_risk_scores': val_risk,
+            'val_risk_strata': val_strata,
+            'labels': val_labels,
+            'preds': val_preds,
+            'probs': val_probs,
             'history': self.history
         }
+
+    def fit_development_final(self, epochs: int = 50) -> None:
+        """Retrains NeuroGAT on 100% of development nodes (train_mask) for optimal epochs."""
+        self.model.train()
+        for epoch in range(1, epochs + 1):
+            train_loss, train_acc = self.train_epoch()
+            if epoch % 10 == 0 or epoch == epochs or epoch == 1:
+                print(f"Final Retraining Epoch {epoch:03d}/{epochs:03d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}%")
 
     def _plot_learning_curve(self):
         figures_dir = getattr(Config, 'FIGURES_DIR', '/kaggle/working/outputs/figures')
@@ -590,12 +601,12 @@ class GNNTrainer:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 6.4 5-Fold Cross-Validation Pipeline
+# 6.4 5-Fold Cross-Validation & Two-Stage Test-Once Protocol
 # ═══════════════════════════════════════════════════════════════════
 
 def train_gnn_5fold(features_path: str, labels_path: str):
     print("\n" + "="*70)
-    print("  🧠 SECTION 6: TRAINING NeuroGAT (MULTI-SCALE GRAPH ATTENTION NETWORK)")
+    print("  🧠 SECTION 6: TRAINING NeuroGAT (A* / Q1 TWO-STAGE TEST-ONCE PROTOCOL)")
     print("="*70)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -627,15 +638,19 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
     k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
 
-    print("📖 Evaluation Setting: Transductive Population Graph Learning (Parisot et al., MICCAI 2017 & MedIA 2018).")
-    print("   Transductive setting: unlabeled validation and test node features are available during graph")
-    print("   construction for population manifold geometry, but all labels remain strictly masked during training and optimization.")
+    print("📖 Protocol Overview:")
+    print("   Stage 1: 5-Fold Stratified Cross-Validation on Development Cohort (Test Locked).")
+    print("   Stage 2: Final Retraining on 100% of Development Cohort with Frozen Scalers.")
+    print("   Stage 3: Single Definitive Evaluation on Held-Out Test Cohort (Test-Once Protocol).")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1: 5-Fold Cross-Validation on Development Cohort
+    # ═══════════════════════════════════════════════════════════════════
     cv_results = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
         print(f"\n==================================================")
-        print(f"  Training Fold {fold_idx + 1}/5 (Multi-Scale GAT)")
+        print(f"  Stage 1: Training Fold {fold_idx + 1}/5 (Development CV)")
         print(f"==================================================")
 
         t0 = time.time()
@@ -648,7 +663,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         if cog_scores is not None:
             fold_graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1).to(device)
 
-        # Create masks on GPU
+        # Create masks on GPU: Test set remains strictly un-evaluated during fold training
         fold_graph.train_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
         fold_graph.val_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
         fold_graph.test_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
@@ -660,12 +675,12 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Train
+        # Train: Evaluate strictly on validation partition
         trainer = GNNTrainer(fold_graph, fold_idx, device)
         res = trainer.fit()
         fold_time = (time.time() - t0) / 60
 
-        print(f"\n🎯 Fold {fold_idx + 1} Best Val Acc: {res['best_val_acc']*100:.2f}% (Val Loss: {res['best_val_loss']:.4f}) | Test Acc: {res['test_acc']*100:.2f}% | Cog MAE: {res['test_mae']:.4f}")
+        print(f"\n🎯 Fold {fold_idx + 1} Best Val Acc: {res['best_val_acc']*100:.2f}% (Val Loss: {res['best_val_loss']:.4f})")
         print(f"⏱️ Fold Time: {fold_time:.1f} minutes")
 
         cv_results.append(res)
@@ -675,23 +690,112 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    mean_test_acc = np.mean([r['test_acc'] for r in cv_results])
-    mean_test_mae = np.mean([r['test_mae'] for r in cv_results])
-    print(f"\n🏆 Mean Held-Out Test Accuracy Across 5 Folds: {mean_test_acc*100:.2f}% | Cognitive MAE: {mean_test_mae:.4f}")
+    val_accs = [r['best_val_acc'] for r in cv_results]
+    print(f"\n🏆 Mean Validation Accuracy Across 5 Folds: {np.mean(val_accs)*100:.2f}% ± {np.std(val_accs)*100:.2f}%")
 
-    # Save complete results checkpoint
+    # Save CV results checkpoint
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'results'), exist_ok=True)
     torch.save(cv_results, os.path.join(output_dir, 'cv_gnn_results.pt'))
 
-    # Save overall best model state based STRICTLY on validation performance (Zero Test Leakage)
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 2: Retraining NeuroGAT on 100% Development Cohort
+    # ═══════════════════════════════════════════════════════════════════
+    print("\n" + "="*70)
+    print("  STAGE 2: FINAL RETRAINING ON 100% DEVELOPMENT COHORT (ZERO TEST LEAKAGE)")
+    print("="*70)
+
+    try:
+        import joblib
+    except ImportError:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "joblib"])
+        import joblib
+
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    train_val_indices = [i for i in range(len(features)) if i not in set(test_indices)]
+    print(f"👥 Retraining on {len(train_val_indices)} Development participants (Held-out Test: {len(test_indices)} locked).")
+
+    # Fit and export frozen PCA for deployment / inference app (Issue 12)
+    dev_features = features[train_val_indices]
+    if features.shape[1] >= 1024:
+        pca_dim = getattr(Config, 'PCA_DIM', 64)
+        final_pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
+        final_pca.fit(dev_features[:, :1024])
+        joblib.dump(final_pca, os.path.join(output_dir, 'results', 'final_pca.joblib'))
+        print(f"💾 Exported final PCA model to: {output_dir}/results/final_pca.joblib")
+
+    # Build final development graph
+    final_graph = build_multiscale_population_graph(
+        features, k_list=k_list, train_indices=train_val_indices
+    ).to(device)
+    final_graph.y = torch.tensor(labels, dtype=torch.long).to(device)
+    if cog_scores is not None:
+        final_graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1).to(device)
+
+    final_graph.train_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
+    final_graph.val_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
+    final_graph.test_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
+
+    final_graph.train_mask[train_val_indices] = True
+    final_graph.test_mask[test_indices] = True
+
+    # Fit and export frozen StandardScaler
+    final_scaler = StandardScaler()
+    final_scaler.fit(final_graph.x[final_graph.train_mask].cpu().numpy())
+    joblib.dump(final_scaler, os.path.join(output_dir, 'results', 'final_scaler.joblib'))
+    print(f"💾 Exported final StandardScaler to: {output_dir}/results/final_scaler.joblib")
+
+    # Determine optimal epochs from CV history (median epoch reached by folds)
+    fold_epochs = [len(r['history']['val_loss']) for r in cv_results]
+    optimal_epochs = max(20, int(np.median(fold_epochs)))
+    print(f"⏱️ Retraining final model on 100% development set for {optimal_epochs} epochs (median CV convergence)...")
+
+    final_trainer = GNNTrainer(final_graph, fold_idx=0, device=device)
+    final_trainer.fit_development_final(epochs=optimal_epochs)
+
+    # Save final model checkpoint
     os.makedirs(checkpoint_dir, exist_ok=True)
-    best_fold_idx = int(np.argmin([r['best_val_loss'] for r in cv_results]))
-    best_fold_path = os.path.join(checkpoint_dir, f'fold{best_fold_idx}_best.pt')
-    target_best_path = os.path.join(checkpoint_dir, 'neurogat_best_model.pt')
-    if os.path.exists(best_fold_path):
-        import shutil
-        shutil.copyfile(best_fold_path, target_best_path)
-        print(f"💾 Exported top performing model (Fold {best_fold_idx + 1}, Min Val Loss: {cv_results[best_fold_idx]['best_val_loss']:.4f}) to: {target_best_path}")
+    final_ckpt_path = os.path.join(checkpoint_dir, 'neurogat_final_model.pt')
+    torch.save({
+        'model_state_dict': final_trainer.model.state_dict(),
+        'optimal_epochs': optimal_epochs,
+        'mean_val_acc': np.mean(val_accs)
+    }, final_ckpt_path)
+    torch.save({'model_state_dict': final_trainer.model.state_dict()}, os.path.join(checkpoint_dir, 'neurogat_best_model.pt'))
+    print(f"💾 Exported final retrained model to: {final_ckpt_path}")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 3: Single Definitive Test Evaluation (Test-Once Protocol)
+    # ═══════════════════════════════════════════════════════════════════
+    print("\n" + "="*70)
+    print("  STAGE 3: DEFINITIVE TEST EVALUATION (HELD-OUT TEST COHORT TEST-ONCE PROTOCOL)")
+    print("="*70)
+    test_loss, test_acc, test_mae, test_preds, test_probs, test_cog, test_risk, test_strata = final_trainer.evaluate(final_graph.test_mask)
+    test_labels = final_graph.y[final_graph.test_mask].cpu().numpy()
+
+    print(f"\n🎯 FINAL HELD-OUT TEST EVALUATION (N={len(test_indices)}):")
+    print(f"   Accuracy: {test_acc*100:.2f}% | Loss: {test_loss:.4f} | Cognitive MAE: {test_mae:.4f}")
+
+    # Export definitive test predictions
+    test_results = {
+        'test_acc': test_acc,
+        'test_loss': test_loss,
+        'test_mae': test_mae,
+        'test_preds': test_preds,
+        'test_probs': test_probs,
+        'test_labels': test_labels,
+        'test_cog_preds': test_cog,
+        'test_risk_scores': test_risk,
+        'test_risk_strata': test_strata,
+        'labels': test_labels,
+        'preds': test_preds,
+        'probs': test_probs
+    }
+    torch.save(test_results, os.path.join(output_dir, 'results', 'final_test_predictions.pt'))
+    print(f"💾 Exported final test predictions to: {output_dir}/results/final_test_predictions.pt")
 
     return cv_results
 

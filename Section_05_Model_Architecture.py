@@ -181,38 +181,58 @@ class CrossModalAttentionFusion(nn.Module):
         dropout: float = 0.1
     ):
         super().__init__()
-        self.feature_dim = feature_dim
         self.embed_dim = embed_dim
+        # Determine exact modality dimensions with strict single-source-of-truth parity
+        configured_deep = getattr(Config, 'PCA_DIM', 64)
+        configured_radio = getattr(Config, 'RADIOMICS_FEATURE_DIM', 68)
+        configured_clin = getattr(Config, 'CLINICAL_DIM', 6)
+        expected_full = configured_deep + configured_radio + configured_clin
 
-        # Determine exact modality dimensions dynamically
-        configured_deep = getattr(Config, 'PCA_DIM', deep_dim)
-        configured_radio = getattr(Config, 'RADIOMICS_FEATURE_DIM', radio_dim)
-
-        if feature_dim > (configured_deep + configured_radio):
+        if feature_dim == expected_full:
+            # Full Multimodal Standard: Exactly 64 (Deep) + 68 (Radiomics) + 6 (Demographics) = 138-D
             self.deep_dim = configured_deep
             self.radio_dim = configured_radio
-            self.clin_dim = feature_dim - (self.deep_dim + self.radio_dim)
+            self.clin_dim = configured_clin
+            assert self.deep_dim + self.radio_dim + self.clin_dim == feature_dim, (
+                f"Modality dimension mismatch! Expected {self.deep_dim}+{self.radio_dim}+{self.clin_dim}={expected_full}, "
+                f"but got {feature_dim}"
+            )
+        elif feature_dim == (configured_deep + configured_radio):
+            # Ablation Mode: Imaging Only (No Demographics) = 132-D
+            self.deep_dim = configured_deep
+            self.radio_dim = configured_radio
+            self.clin_dim = 0
+        elif feature_dim == configured_deep:
+            # Ablation Mode: Deep Features Only = 64-D
+            self.deep_dim = configured_deep
+            self.radio_dim = 0
+            self.clin_dim = 0
+        elif feature_dim > (configured_deep + configured_radio):
+            self.deep_dim = configured_deep
+            self.radio_dim = configured_radio
+            self.clin_dim = feature_dim - (configured_deep + configured_radio)
         elif feature_dim > configured_deep:
             self.deep_dim = configured_deep
-            self.radio_dim = feature_dim - self.deep_dim
+            self.radio_dim = feature_dim - configured_deep
             self.clin_dim = 0
         else:
             self.deep_dim = feature_dim // 2
             self.radio_dim = feature_dim - self.deep_dim
             self.clin_dim = 0
 
-        self.num_modalities = 3 if self.clin_dim > 0 else 2
+        self.num_modalities = (1 if self.deep_dim > 0 else 0) + (1 if self.radio_dim > 0 else 0) + (1 if self.clin_dim > 0 else 0)
 
         self.proj_deep = nn.Sequential(
             nn.Linear(self.deep_dim, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU()
-        )
+        ) if self.deep_dim > 0 else None
+
         self.proj_radio = nn.Sequential(
             nn.Linear(self.radio_dim, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.GELU()
-        )
+        ) if self.radio_dim > 0 else None
         if self.clin_dim > 0:
             self.proj_clin = nn.Sequential(
                 nn.Linear(self.clin_dim, embed_dim),
@@ -250,18 +270,21 @@ class CrossModalAttentionFusion(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         N = x.size(0)
 
-        # Partition modalities for each patient
-        x_deep = x[:, :self.deep_dim]
-        x_radio = x[:, self.deep_dim:self.deep_dim + self.radio_dim]
-        h_deep = self.proj_deep(x_deep).unsqueeze(1)
-        h_radio = self.proj_radio(x_radio).unsqueeze(1)
+        # Dynamic modality token formation
+        token_list = []
+        if self.proj_deep is not None and self.deep_dim > 0:
+            x_deep = x[:, :self.deep_dim]
+            token_list.append(self.proj_deep(x_deep).unsqueeze(1))
+
+        if self.proj_radio is not None and self.radio_dim > 0:
+            x_radio = x[:, self.deep_dim:self.deep_dim + self.radio_dim]
+            token_list.append(self.proj_radio(x_radio).unsqueeze(1))
 
         if self.proj_clin is not None and self.clin_dim > 0:
             x_clin = x[:, self.deep_dim + self.radio_dim:self.deep_dim + self.radio_dim + self.clin_dim]
-            h_clin = self.proj_clin(x_clin).unsqueeze(1)
-            tokens = torch.cat([h_deep, h_radio, h_clin], dim=1) + self.modality_emb
-        else:
-            tokens = torch.cat([h_deep, h_radio], dim=1) + self.modality_emb
+            token_list.append(self.proj_clin(x_clin).unsqueeze(1))
+
+        tokens = torch.cat(token_list, dim=1) + self.modality_emb
 
         # Cross-modal multi-head attention within each patient's representation
         attn_out, _ = self.mha(tokens, tokens, tokens)

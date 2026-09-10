@@ -92,19 +92,53 @@ class Native3DFeatureExtractor(nn.Module):
         return self.features(x)
 
 
+# ── Exact 68 Handcrafted Physical Radiomics Feature Names ──
+RADIOMICS_FEATURE_NAMES = (
+    # 1. First-order intensity statistics (16)
+    [
+        'Intensity_Mean', 'Intensity_Std', 'Intensity_Var', 'Intensity_Median',
+        'Intensity_Min', 'Intensity_Max', 'Intensity_Skewness', 'Intensity_Kurtosis',
+        'Intensity_Energy', 'Intensity_Entropy', 'Intensity_P5', 'Intensity_P10',
+        'Intensity_P25', 'Intensity_P75', 'Intensity_P90', 'Intensity_P95'
+    ] +
+    # 2. Multi-planar profile features (24: 8 per axis x 3)
+    [
+        f'{plane}_Profile_{stat}'
+        for plane in ['Axial', 'Coronal', 'Sagittal']
+        for stat in ['Mean', 'Std', 'Max', 'Median', 'P25', 'P75', 'Var', 'NonZero_Fraction']
+    ] +
+    # 3. Spatial gradients & Edge features (20)
+    [
+        'Gradient_Mean', 'Gradient_Std', 'Gradient_Max', 'Gradient_Median',
+        'Gradient_P10', 'Gradient_P90', 'Gradient_Z_Mean', 'Gradient_Z_Std',
+        'Gradient_Y_Mean', 'Gradient_Y_Std', 'Gradient_X_Mean', 'Gradient_X_Std',
+        'Gradient_Var', 'Gradient_Edge_Fraction', 'Gradient_P25', 'Gradient_P75',
+        'Gradient_P5', 'Gradient_P95', 'Gradient_Energy', 'Gradient_Range'
+    ] +
+    # 4. Volume / Geometry / Brain Parenchyma Fraction (8)
+    [
+        'Brain_Volume_Voxels', 'Brain_Parenchyma_Fraction', 'Hyperintense_Voxel_Fraction',
+        'Extreme_Hyperintense_Fraction', 'Extreme_Hypointense_Fraction',
+        'Coefficient_of_Variation', 'Dynamic_Range_Ratio', 'Quartile_Dispersion'
+    ]
+)
+
+
 def get_pretrained_densenet(device):
     """
-    Loads a 3D DenseNet from MONAI, or falls back to native PyTorch 3D extractor.
+    Loads a verified pretrained 3D DenseNet from MONAI/MedicalNet, or native PyTorch 3D extractor with weights.
     
     Spatial Representation Learning Protocol:
       - The spatial encoder must never be used as an untrained random feature extractor.
-      - If external pretrained weights are unavailable, the encoder may be initialized from external
+      - If external pretrained weights are unavailable, the encoder must be initialized from verified
         biomedical checkpoints (e.g., MedicalNet / Med3D / MONAI Model Zoo) or self-supervised representations.
-      - During cross-validation, representation learning must be trained exclusively on the training partition;
-        supervised pretraining on the entire development cohort prior to fold-wise cross-validation is prohibited.
+      - Supervised pretraining on the entire development cohort prior to fold-wise cross-validation is prohibited.
     """
     external_weights = getattr(Config, 'PRETRAINED_CNN_WEIGHTS', None)
+    require_pretrained = getattr(Config, 'REQUIRE_PRETRAINED_CNN', True)
+    weights_loaded = False
     
+    # 1. Attempt MONAI DenseNet121
     if DenseNet121 is not None:
         try:
             model = DenseNet121(spatial_dims=3, in_channels=1, out_channels=4).to(device)
@@ -113,22 +147,37 @@ def get_pretrained_densenet(device):
                 ckpt = torch.load(external_weights, map_location=device, weights_only=False)
                 state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
                 model.load_state_dict(state, strict=False)
+                weights_loaded = True
+                print("✅ Successfully loaded external 3D DenseNet weights.")
             model.class_layers.out = nn.Identity()
             model.eval()
-            return model
+            if weights_loaded or not require_pretrained:
+                return model
         except Exception as e:
-            print(f"⚠️ MONAI initialization note: {e}. Falling back to native 3D extractor.")
+            print(f"⚠️ MONAI initialization note: {e}. Checking native 3D extractor.")
 
-    print("ℹ️ Using native PyTorch 3D CNN Feature Extractor (1024-D).")
+    # 2. Native PyTorch 3D CNN Feature Extractor (1024-D)
     model = Native3DFeatureExtractor(out_dim=1024).to(device)
     if external_weights and os.path.exists(external_weights):
         try:
             ckpt = torch.load(external_weights, map_location=device, weights_only=False)
             state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
             model.load_state_dict(state, strict=False)
-            print(f"📦 Loaded native 3D CNN weights from: {external_weights}")
+            print(f"📦 Successfully loaded verified 3D CNN weights from: {external_weights}")
+            weights_loaded = True
         except Exception as e:
-            print(f"⚠️ Could not load external weights: {e}")
+            print(f"⚠️ Could not load external weights into native extractor: {e}")
+
+    if not weights_loaded and require_pretrained:
+        raise RuntimeError(
+            "❌ PRETRAINED ENCODER ENFORCEMENT ERROR:\n"
+            "Pretrained 3D biomedical encoder weights are strictly required under Q1 protocol.\n"
+            "Random CNN initialization as a static feature extractor creates unstructured "
+            "noise that collapses patient similarity graphs and corrupts downstream classification.\n"
+            "Please provide verified MedicalNet/MONAI weights via Config.PRETRAINED_CNN_WEIGHTS, "
+            "or explicitly set Config.REQUIRE_PRETRAINED_CNN = False only for synthetic verification."
+        )
+
     model.eval()
     return model
 
