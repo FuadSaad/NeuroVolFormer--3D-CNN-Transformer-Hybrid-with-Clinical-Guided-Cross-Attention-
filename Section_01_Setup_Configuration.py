@@ -287,6 +287,11 @@ class Config:
     PREPROCESSED_DIR = os.path.join(BASE_OUTPUT, 'preprocessed').replace('\\', '/')
     FIGURES_DIR = os.path.join(BASE_OUTPUT, 'outputs/figures').replace('\\', '/')
 
+    # ── Pipeline Execution & Clean-Slate Control ──
+    CLEAN_OUTPUTS_ON_START = True          # Auto-clean previous run checkpoints, figures & metrics for fresh run
+    PRESERVE_EXTRACTED_FEATURES = True     # True: preserve node_features.npy, node_labels.npy, splits.pt (~3h runtime saved)
+                                           # False: full nuclear purge of all preprocessed data as well
+
     # ── Visualization ──
     FIG_DPI = 300
     FIG_FORMAT = 'png'
@@ -353,6 +358,108 @@ def create_directories() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 1.6.5 Clean Previous Run Artifacts (Fresh Run Initializer)
+# ═══════════════════════════════════════════════════════════════════
+
+def clean_previous_run_artifacts(preserve_extracted_features: bool = True) -> None:
+    """
+    Purge previous run checkpoints, figures, logs, and evaluation metrics to ensure
+    a completely clean-slate execution.
+    
+    Args:
+        preserve_extracted_features (bool): If True, preserves node_features.npy, 
+            node_labels.npy, processed_files.csv, radiomics_features.csv, and splits.pt 
+            to prevent re-running the 3-4 hour 3D feature extraction step.
+            If False, performs a full nuclear purge of everything.
+    """
+    import shutil
+
+    print("\n" + "=" * 70)
+    print("  🧹 Clean-Slate Execution Initializer: Purging Old Run Artifacts")
+    print("=" * 70)
+
+    # 1. Flush GPU & System RAM
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:
+            pass
+        print("  🧹 Flushed GPU CUDA memory cache & Python garbage collection.")
+
+    cleaned_items = []
+
+    # 2. Checkpoints directory
+    if os.path.exists(Config.CHECKPOINT_DIR):
+        try:
+            shutil.rmtree(Config.CHECKPOINT_DIR)
+            cleaned_items.append(f"Wiped checkpoints directory: {Config.CHECKPOINT_DIR}")
+        except Exception as e:
+            print(f"  ⚠️ Could not remove {Config.CHECKPOINT_DIR}: {e}")
+
+    # 3. Figures directory
+    if os.path.exists(Config.FIGURES_DIR):
+        try:
+            shutil.rmtree(Config.FIGURES_DIR)
+            cleaned_items.append(f"Wiped figures directory: {Config.FIGURES_DIR}")
+        except Exception as e:
+            print(f"  ⚠️ Could not remove {Config.FIGURES_DIR}: {e}")
+
+    # 4. Outputs subdirectories: xai, models, results
+    for sub in ['xai', 'models', 'results']:
+        sub_path = os.path.join(Config.OUTPUT_DIR, sub).replace('\\', '/')
+        if os.path.exists(sub_path):
+            try:
+                shutil.rmtree(sub_path)
+                cleaned_items.append(f"Wiped output subdirectory: {sub_path}")
+            except Exception:
+                pass
+
+    # 5. Stale evaluation metrics, tables, and caches in BASE_OUTPUT and OUTPUT_DIR
+    target_patterns = [
+        os.path.join(Config.BASE_OUTPUT, '*.pt'),
+        os.path.join(Config.BASE_OUTPUT, '*.tex'),
+        os.path.join(Config.BASE_OUTPUT, '*.png'),
+        os.path.join(Config.OUTPUT_DIR, '*.csv'),
+        os.path.join(Config.OUTPUT_DIR, '*.tex'),
+        os.path.join(Config.OUTPUT_DIR, '*.pt'),
+        os.path.join(Config.OUTPUT_DIR, '*.npy'),
+        os.path.join(Config.OUTPUT_DIR, '*.txt'),
+    ]
+    for pattern in target_patterns:
+        for f in glob.glob(pattern):
+            fname = os.path.basename(f)
+            # Guard against deleting essential preprocessed feature files
+            if preserve_extracted_features and ('node_features' in fname or 'splits.pt' in fname or 'node_labels' in fname):
+                continue
+            try:
+                os.remove(f)
+                cleaned_items.append(f"Removed stale file: {fname}")
+            except Exception:
+                pass
+
+    # 6. Preprocessed data handling
+    if not preserve_extracted_features and os.path.exists(Config.PREPROCESSED_DIR):
+        try:
+            shutil.rmtree(Config.PREPROCESSED_DIR)
+            cleaned_items.append(f"Wiped preprocessed features directory: {Config.PREPROCESSED_DIR}")
+        except Exception:
+            pass
+    elif preserve_extracted_features and os.path.exists(Config.PREPROCESSED_DIR):
+        features_found = [f for f in os.listdir(Config.PREPROCESSED_DIR) if f.endswith(('.npy', '.csv', '.pt'))]
+        if features_found:
+            print(f"  💾 Preserved {len(features_found)} preprocessed feature file(s) in {Config.PREPROCESSED_DIR}:")
+            for feat in features_found:
+                print(f"     - {feat}")
+            print("     (Saves ~3-4 hours of 3D feature extraction runtime!)")
+
+    print(f"  ✅ Cleanup complete! Purged {len(cleaned_items)} old artifact(s)/director(y/ies).")
+    print("  🚀 Fresh environment initialized for new run.")
+    print("=" * 70 + "\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 1.7 Matplotlib & Seaborn Configuration
 # ═══════════════════════════════════════════════════════════════════
 
@@ -394,6 +501,7 @@ def print_config(config: Config) -> None:
         'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'LEARNING_RATE', 'WEIGHT_DECAY'],
         'Loss & Balancing': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_LOGIT_ADJUSTMENT', 'USE_EFFECTIVE_NUM_SAMPLES', 'COST_EMCI_LMCI_PENALTY'],
         'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED'],
+        'Pipeline & Clean-Slate': ['CLEAN_OUTPUTS_ON_START', 'PRESERVE_EXTRACTED_FEATURES'],
     }
     for cat_name, params in categories.items():
         print(f"\n  [{cat_name}]")
@@ -473,6 +581,11 @@ print()
 
 seed_everything()
 DEVICE = setup_device()
+
+# Clean-slate execution: purge previous artifacts if configured
+if Config.CLEAN_OUTPUTS_ON_START:
+    clean_previous_run_artifacts(preserve_extracted_features=Config.PRESERVE_EXTRACTED_FEATURES)
+
 create_directories()
 setup_plotting()
 print_config(Config)
