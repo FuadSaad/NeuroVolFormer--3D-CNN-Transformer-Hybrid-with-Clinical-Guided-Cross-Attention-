@@ -287,14 +287,24 @@ class GNNTrainer:
             weight_decay=weight_decay
         )
 
-        # Cosine Annealing Learning Rate Scheduler
-        t_0 = getattr(Config, 'T_0', 20)
-        t_mult = getattr(Config, 'T_MULT', 2)
-        self.scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=t_0,
-            T_mult=t_mult
-        )
+        # Anti-Overfitting Learning Rate Scheduler
+        scheduler_type = getattr(Config, 'LR_SCHEDULER_TYPE', 'ReduceLROnPlateau')
+        if scheduler_type == 'ReduceLROnPlateau':
+            factor = getattr(Config, 'LR_PLATEAU_FACTOR', 0.5)
+            patience_lr = getattr(Config, 'LR_PLATEAU_PATIENCE', 5)
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, mode='min', factor=factor, patience=patience_lr, min_lr=1e-6
+            )
+            self.is_plateau_scheduler = True
+        else:
+            t_0 = getattr(Config, 'T_0', 20)
+            t_mult = getattr(Config, 'T_MULT', 2)
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=t_0,
+                T_mult=t_mult
+            )
+            self.is_plateau_scheduler = False
 
         # 1. Class Priors for Logit Adjustment (Menon et al., NeurIPS 2020)
         train_labels = self.graph.y[self.graph.train_mask].cpu().numpy()
@@ -410,7 +420,8 @@ class GNNTrainer:
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=2.0)
         self.optimizer.step()
-        self.scheduler.step()
+        if not self.is_plateau_scheduler:
+            self.scheduler.step()
 
         preds = logits[train_mask].argmax(dim=1)
         acc = accuracy_score(self.graph.y[train_mask].cpu(), preds.cpu())
@@ -459,7 +470,7 @@ class GNNTrainer:
 
     def fit(self, epochs: Optional[int] = None, patience: Optional[int] = None) -> Dict[str, Any]:
         epochs = epochs if epochs is not None else getattr(Config, 'EPOCHS', 300)
-        patience = patience if patience is not None else getattr(Config, 'PATIENCE', 50)
+        patience = patience if patience is not None else getattr(Config, 'PATIENCE', 15)
         ckpt_dir = getattr(Config, 'CHECKPOINT_DIR', '/kaggle/working/checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
         best_ckpt_path = os.path.join(ckpt_dir, f'fold{self.fold_idx}_best.pt')
@@ -467,6 +478,10 @@ class GNNTrainer:
         for epoch in range(1, epochs + 1):
             train_loss, train_acc = self.train_epoch()
             val_loss, val_acc, val_mae, _, _, _, _, _ = self.evaluate(self.graph.val_mask)
+
+            # Step ReduceLROnPlateau scheduler strictly based on validation loss
+            if self.is_plateau_scheduler:
+                self.scheduler.step(val_loss)
 
             self.history['train_loss'].append(train_loss)
             self.history['train_acc'].append(train_acc)
@@ -619,8 +634,11 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
         # Build fold-isolated graph: PCA & StandardScaler fit strictly on train_idx (Zero Leakage)
         fold_graph = build_multiscale_population_graph(
-            features, labels, k_list=k_list, cognitive_scores=cog_scores, train_indices=train_idx
+            features, k_list=k_list, train_indices=train_idx
         ).to(device)
+        fold_graph.y = torch.tensor(labels, dtype=torch.long).to(device)
+        if cog_scores is not None:
+            fold_graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1).to(device)
 
         # Create masks on GPU
         fold_graph.train_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)

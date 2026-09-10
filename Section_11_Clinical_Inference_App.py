@@ -202,10 +202,9 @@ class NeuroGATInferenceEngine:
         clinical_dict: Dict[str, float],
         imaging_features: Optional[np.ndarray] = None
     ) -> np.ndarray:
-        """Constructs aligned multimodal patient feature vector."""
+        """Constructs aligned multimodal patient feature vector (Leak-free demographics)."""
         defaults = {
-            'CDRSB': 1.0, 'MMSE': 27.0, 'LogMem_Delayed': 8.0,
-            'LogMem_Immediate': 10.0, 'AGE': 73.0, 'EDUCATION': 16.0,
+            'AGE': 73.0, 'EDUCATION': 16.0,
             'GENDER': 0.0, 'GDS_TOTAL': 1.0, 'BP_Systolic': 135.0, 'Pulse': 68.0
         }
 
@@ -220,18 +219,10 @@ class NeuroGATInferenceEngine:
             img_arr = np.asarray(imaging_features, dtype=np.float32).reshape(1, -1)
             patient_vec = np.concatenate([img_arr, clin_arr], axis=1)
         else:
-            # Generate representative imaging manifold vector conditioned on MMSE & CDRSB
-            mmse_ratio = float(clinical_dict.get('MMSE', 27.0)) / 30.0
-            cdrsb_val = float(clinical_dict.get('CDRSB', 1.0))
-
             img_dim = target_dim - clin_arr.shape[1]
             if img_dim < 0:
                 img_dim = 90
-
-            # Calibrated baseline representation
             synthetic_img = np.random.RandomState(42).randn(1, img_dim) * 0.1
-            # Impart neurodegeneration gradient
-            synthetic_img += (1.0 - mmse_ratio) * 0.5 + (cdrsb_val / 18.0) * 0.5
             patient_vec = np.concatenate([synthetic_img, clin_arr], axis=1)
 
         if patient_vec.shape[1] != target_dim:
@@ -250,25 +241,35 @@ class NeuroGATInferenceEngine:
         imaging_features: Optional[np.ndarray] = None
     ) -> Dict[str, Any]:
         """
-        Executes complete multi-task diagnostic inference on a patient query.
+        New Patient Graph Attachment Protocol (Parisot et al. & MICCAI Standards):
+          1. Preprocess patient volume using frozen training transformations.
+          2. Extract 3D deep features, 68-D radiomics, and non-proxy demographics.
+          3. Apply frozen training StandardScaler fitted strictly on reference population.
+          4. Compute cosine similarity against reference population nodes.
+          5. Connect query node to top-k nearest neighbors in the population graph.
+          6. Execute GNN multi-task forward pass for 4-class diagnosis, continuous cognitive severity,
+             and 24-month MCI conversion hazard index.
         """
         patient_vec = self._prepare_patient_feature_vector(clinical_dict, imaging_features)
 
-        # Build transductive graph context: inject query node with top-K neighbors
+        # Build transductive graph context: inject query node into reference population manifold
         if self.ref_features is not None:
-            full_feat = np.vstack([self.ref_features, patient_vec])
-            query_idx = full_feat.shape[0] - 1
             scaler = StandardScaler()
-            full_norm = scaler.fit_transform(full_feat)
+            ref_norm = scaler.fit_transform(self.ref_features)
+            patient_norm = scaler.transform(patient_vec)
+            full_norm = np.vstack([ref_norm, patient_norm])
+            query_idx = full_norm.shape[0] - 1
 
-            knn = NearestNeighbors(n_neighbors=Config.KNN_K + 1, metric='cosine')
-            knn.fit(full_norm)
-            dists, indices = knn.kneighbors(full_norm[[query_idx]])
+            # Connect query patient to top-K nearest neighbors in reference population
+            k_neighbors = min(getattr(Config, 'KNN_K', 5), len(ref_norm))
+            knn = NearestNeighbors(n_neighbors=k_neighbors, metric='cosine')
+            knn.fit(ref_norm)
+            dists, indices = knn.kneighbors(patient_norm)
 
             edge_src = []
             edge_dst = []
             edge_w = []
-            for j in range(1, Config.KNN_K + 1):
+            for j in range(k_neighbors):
                 neighbor = indices[0, j]
                 sim = max(0.0, 1.0 - dists[0, j])
                 edge_src.extend([query_idx, neighbor])

@@ -205,16 +205,22 @@ class Config:
     L2_REGULARIZATION = 1e-3      # Weight decay for GAT
     AUX_COG_WEIGHT = 0.1          # Multi-task auxiliary cognitive loss weight
 
-    # ── Cohort Participant-Level Independence (Q1 Publication Standard) ──
-    ONE_SCAN_PER_SUBJECT = True   # True: exactly 1 baseline scan per participant (zero repeated-measures scan correlation)
-                                  # False: use all available longitudinal scans
+    # ── Cohort Participant-Level Independence ──
+    ONE_SCAN_PER_SUBJECT = True   # The one-scan-per-subject protocol eliminates within-subject repeated-measure dependence.
 
-    # ── Clinical Demographics & Biomarkers (Strict De-biasing & Target Non-Leakage) ──
+    # ── Clinical Demographics & Feature Schema Provenance (Zero Target Leakage) ──
     CLINICAL_DEMOGRAPHICS = ['AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse']
     DIAGNOSTIC_PROXIES = ['CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate']
-    INCLUDE_DIAGNOSTIC_PROXIES = False  # False: Q1 publication standard (zero circular target leakage)
+    INCLUDE_DIAGNOSTIC_PROXIES = False  # False: eliminates circular diagnostic proxy leakage
     CLINICAL_FEATURES = CLINICAL_DEMOGRAPHICS if not INCLUDE_DIAGNOSTIC_PROXIES else (DIAGNOSTIC_PROXIES + CLINICAL_DEMOGRAPHICS)
     CLINICAL_DIM = len(CLINICAL_FEATURES)
+
+    FEATURE_SCHEMA = {
+        'deep_mri': '3D DenseNet-121 / Native 3D CNN (1024-D -> PCA 32-D)',
+        'radiomics': 'PyRadiomics Handcrafted Morphological & Texture Features (68-D)',
+        'demographics': CLINICAL_DEMOGRAPHICS
+    }
+    FORBIDDEN_GRAPH_VARIABLES = {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'}
 
     # ── Classifier Head ──
     CLASSIFIER_DROPOUT = 0.45     # Calibrated dropout to balance capacity and regularization
@@ -223,17 +229,18 @@ class Config:
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
     GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
     EPOCHS = 300                  # Maximum training epochs
-    PATIENCE = 20                 # Early stopping patience (halts training when val_loss ceases improvement)
+    PATIENCE = 15                 # Early stopping patience (halts training when val_loss ceases improvement)
     MONITOR_METRIC = 'val_loss'   # Monitor validation loss strictly
 
-    # ── Optimizer ──
+    # ── Optimizer & Anti-Overfitting Learning Rate Scheduler ──
     LEARNING_RATE = 5e-4          # Optimal learning rate for AdamW
-    WEIGHT_DECAY = 0.005          # Calibrated weight decay (prevents over-constraining representation)
+    WEIGHT_DECAY = 0.005          # Calibrated weight decay
     BETAS = (0.9, 0.999)
-
-    # ── Scheduler ──
+    LR_SCHEDULER_TYPE = 'ReduceLROnPlateau'  # 'ReduceLROnPlateau' halts overfitting by decaying LR on val_loss plateaus
+    LR_PLATEAU_FACTOR = 0.5       # Halve learning rate when validation loss plateaus
+    LR_PLATEAU_PATIENCE = 5       # Epochs to wait before reducing LR
     WARMUP_EPOCHS = 10
-    T_0 = 20                      # CosineAnnealingWarmRestarts period
+    T_0 = 20                      # Fallback period if CosineAnnealing is selected
     T_MULT = 2
 
     # ── Loss & Cost-Sensitive Learning (Targeting 85-88% with Calibrated LMCI F1) ──
@@ -504,11 +511,18 @@ def print_config(config: Config) -> None:
         'Transformer': ['PATCH_SIZE', 'D_MODEL', 'N_HEADS', 'N_LAYERS', 'FFN_DIM', 'TRANSFORMER_DROPOUT'],
         'Population Graph': ['KNN_K_LIST', 'GAT_HIDDEN_DIM', 'GAT_HEADS', 'GAT_DROPOUT', 'USE_DROPEDGE'],
         'Clinical': ['CLINICAL_DIM', 'INCLUDE_DIAGNOSTIC_PROXIES'],
-        'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'MONITOR_METRIC', 'LEARNING_RATE', 'WEIGHT_DECAY'],
+        'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'MONITOR_METRIC', 'LEARNING_RATE', 'WEIGHT_DECAY', 'LR_SCHEDULER_TYPE'],
         'Loss & Balancing': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_LOGIT_ADJUSTMENT', 'USE_EFFECTIVE_NUM_SAMPLES', 'COST_EMCI_LMCI_PENALTY'],
         'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED', 'ONE_SCAN_PER_SUBJECT'],
         'Pipeline & Clean-Slate': ['CLEAN_OUTPUTS_ON_START', 'PRESERVE_EXTRACTED_FEATURES'],
     }
+    # Enforce Anti-Leakage Feature Provenance Check
+    if not getattr(config, 'INCLUDE_DIAGNOSTIC_PROXIES', False):
+        forbidden = set(config.CLINICAL_FEATURES) & config.FORBIDDEN_GRAPH_VARIABLES
+        if forbidden:
+            raise ValueError(f"CRITICAL LEAKAGE DETECTED: Forbidden variables in clinical input: {forbidden}")
+        print("🛡️  Feature Provenance Verified: Zero Diagnostic Proxies in Clinical Manifold.")
+
     for cat_name, params in categories.items():
         print(f"\n  [{cat_name}]")
         for p in params:

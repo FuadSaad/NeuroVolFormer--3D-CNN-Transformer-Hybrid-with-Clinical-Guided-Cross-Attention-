@@ -54,28 +54,37 @@ for _k, _v in _defaults.items():
 
 def build_multiscale_population_graph(
     features: np.ndarray,
-    labels: np.ndarray,
     k_list: List[int] = [3, 5, 10],
-    cognitive_scores: Optional[np.ndarray] = None,
-    train_indices: Optional[Union[List[int], np.ndarray]] = None
+    train_indices: Optional[Union[List[int], np.ndarray]] = None,
+    **kwargs
 ) -> Data:
     """
-    Constructs a Multi-Scale Population Graph (PyG Data) integrating micro-, meso-,
-    and macro-scale phenotypic patient manifolds under Transductive Graph Learning 
-    (Parisot et al., MICCAI 2017 & Medical Image Analysis 2018).
+    Constructs an unsupervised Multi-Scale Population Graph (PyG Data) integrating micro-, meso-,
+    and macro-scale phenotypic patient manifolds (Parisot et al., MICCAI 2017 & Medical Image Analysis 2018).
+
+    Graph topology is generated strictly from unsupervised phenotypic feature affinity.
+    Supervised targets should be assigned downstream:
+      graph.y = torch.tensor(labels, dtype=torch.long)
+      graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1)
 
     Args:
         features: (N, D) multimodal patient feature matrix (Deep + Radiomics + Clinical).
-        labels: (N,) diagnostic class labels (0: AD, 1: CN, 2: EMCI, 3: LMCI).
         k_list: List of neighbor scales (default: [3, 5, 10]).
-        cognitive_scores: (N,) continuous cognitive scores (MMSE or CDR-SB), if available.
         train_indices: Optional indices of training nodes. When provided, PCA and 
                        StandardScaler are strictly fit on train_indices and then used to 
                        transform validation and test nodes (Zero Distribution Leakage).
+        **kwargs: Optional backward compatibility arguments ('labels', 'cognitive_scores').
 
     Returns:
-        torch_geometric.data.Data object containing x, edge_index, edge_attr, y, and optional cog_y.
+        torch_geometric.data.Data object containing x, edge_index, and edge_attr.
     """
+    # Backward compatibility handler for legacy positional/keyword invocations
+    labels = kwargs.get('labels', None)
+    if isinstance(k_list, (np.ndarray, list)) and len(k_list) == len(features):
+        labels = k_list
+        k_list = kwargs.get('k_list', [3, 5, 10])
+    cognitive_scores = kwargs.get('cognitive_scores', None)
+
     print(f"🔗 Building Multi-Scale Population Graph (Scales K={k_list}) for {features.shape[0]} nodes...")
 
     # 1. Clean NaN / Inf values
@@ -159,9 +168,9 @@ def build_multiscale_population_graph(
     return graph_data
 
 
-def build_population_graph(features: np.ndarray, labels: np.ndarray, k: int = 5, train_indices: Optional[Any] = None) -> Data:
+def build_population_graph(features: np.ndarray, k: int = 5, train_indices: Optional[Any] = None, **kwargs) -> Data:
     """Backward-compatible wrapper defaulting to multi-scale population graph."""
-    return build_multiscale_population_graph(features, labels, k_list=[3, k, 10], train_indices=train_indices)
+    return build_multiscale_population_graph(features, k_list=[3, k, 10], train_indices=train_indices, **kwargs)
 
 
 

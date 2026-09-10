@@ -142,16 +142,6 @@ def run_ml_baselines(features_path: str, labels_path: str):
     # Clean NaN / Inf
     X_raw = np.nan_to_num(X_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Standardize input representation to match NeuroGAT symmetrically
-    if X_raw.shape[1] >= 1024:
-        pca = PCA(n_components=32, random_state=Config.SEED)
-        deep_pca = pca.fit_transform(X_raw[:, :1024])
-        handcrafted_and_clin = X_raw[:, 1024:]
-        X = np.concatenate([deep_pca, handcrafted_and_clin], axis=1)
-        print(f"📊 Symmetrical Feature Space (NeuroGAT & Baselines): 3D PCA (32) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
-    else:
-        X = X_raw.copy()
-
     # Load Patient Splits
     splits_path = os.path.join(Config.OUTPUT_DIR, 'results', 'splits.pt')
     if not os.path.exists(splits_path):
@@ -161,6 +151,22 @@ def run_ml_baselines(features_path: str, labels_path: str):
     splits_data = torch.load(splits_path, weights_only=False)
     fold_splits = splits_data['fold_splits']
     test_indices = splits_data['test_indices']
+    train_val_indices = [i for i in range(len(X_raw)) if i not in set(test_indices)]
+
+    # Standardize input representation to match NeuroGAT symmetrically
+    if X_raw.shape[1] >= 1024:
+        pca = PCA(n_components=32, random_state=Config.SEED)
+        pca.fit(X_raw[train_val_indices, :1024])
+        deep_pca = pca.transform(X_raw[:, :1024])
+        handcrafted_and_clin = X_raw[:, 1024:]
+        X = np.concatenate([deep_pca, handcrafted_and_clin], axis=1)
+        print(f"📊 Symmetrical Modality Parity: 3D PCA (32) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
+    else:
+        X = X_raw.copy()
+
+    print("🛡️ Benchmark Protocol: All models receive the same subject-level input modalities and leakage-free")
+    print("   feature information. Graph-based models additionally exploit inter-subject relational structure,")
+    print("   while conventional baselines operate on the corresponding tabular feature representation.")
 
     # Define Standardized, Well-Regularized Baseline Models
     models = {

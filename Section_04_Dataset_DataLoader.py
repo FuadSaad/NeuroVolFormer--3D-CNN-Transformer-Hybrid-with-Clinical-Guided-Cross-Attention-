@@ -296,6 +296,13 @@ def prepare_clinical_features(
     clinical_cols = Config.CLINICAL_FEATURES
     available_cols = [c for c in clinical_cols if c in file_df.columns]
 
+    # Programmatic Guard: Verify no forbidden diagnostic proxies exist in available_cols
+    forbidden_vars = getattr(Config, 'FORBIDDEN_GRAPH_VARIABLES', {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'})
+    if not getattr(Config, 'INCLUDE_DIAGNOSTIC_PROXIES', False):
+        leak_detected = set(available_cols) & forbidden_vars
+        if leak_detected:
+            raise ValueError(f"CRITICAL LEAKAGE DETECTED: Forbidden variables {leak_detected} present in clinical feature inputs!")
+
     if len(available_cols) == 0:
         print("⚠️  No clinical features available, returning zeros")
         features = np.zeros((len(file_df), Config.CLINICAL_DIM), dtype=np.float32)
@@ -452,17 +459,51 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     else:
         print(f"⚠️ Clinical CSV not found at {clinical_csv}! Clinical features will be missing.")
 
-    # Step 0: Participant-Level Cohort De-duplication (Q1 Standard)
+    # Step 0: Participant-Level Cohort De-duplication (Chronological Baseline Selection)
     if getattr(Config, 'ONE_SCAN_PER_SUBJECT', True):
         initial_count = len(file_df)
-        sort_col = 'image_id' if 'image_id' in file_df.columns else ('file_name' if 'file_name' in file_df.columns else 'subject_id')
-        file_df = file_df.sort_values(sort_col).drop_duplicates('subject_id', keep='first').reset_index(drop=True)
+
+        # 1. Identify visit code column ('VISCODE', 'VISCODE2', 'VISIT')
+        viscode_col = next((c for c in ['VISCODE', 'VISCODE2', 'VISIT', 'Visit'] if c in file_df.columns), None)
+        # 2. Identify chronological scan/exam date column ('EXAMDATE', 'Acq Date', 'SCAN_DATE')
+        date_col = next((c for c in ['EXAMDATE', 'Acq Date', 'SCAN_DATE', 'ScanDate', 'Study Date'] if c in file_df.columns), None)
+
+        has_baseline_codes = False
+        if viscode_col:
+            is_bl_mask = file_df[viscode_col].astype(str).str.strip().str.lower().isin(['bl', 'sc', 'baseline', 'm00'])
+            if is_bl_mask.any():
+                has_baseline_codes = True
+                file_df['__is_bl__'] = is_bl_mask
+
+        if has_baseline_codes:
+            sort_cols = ['__is_bl__']
+            ascending_order = [False]
+            if date_col:
+                file_df['__parsed_date__'] = pd.to_datetime(file_df[date_col], errors='coerce')
+                sort_cols.append('__parsed_date__')
+                ascending_order.append(True)
+            file_df = file_df.sort_values(sort_cols, ascending=ascending_order)
+            file_df = file_df.drop_duplicates('subject_id', keep='first').drop(columns=['__is_bl__'])
+            if '__parsed_date__' in file_df.columns:
+                file_df = file_df.drop(columns=['__parsed_date__'])
+            file_df = file_df.reset_index(drop=True)
+            method_desc = f"explicit visit code ('{viscode_col}') prioritized"
+        elif date_col:
+            file_df['__parsed_date__'] = pd.to_datetime(file_df[date_col], errors='coerce')
+            file_df = file_df.sort_values(['subject_id', '__parsed_date__'], ascending=[True, True])
+            file_df = file_df.drop_duplicates('subject_id', keep='first').drop(columns=['__parsed_date__']).reset_index(drop=True)
+            method_desc = f"earliest acquisition date ('{date_col}')"
+        else:
+            sort_col = 'image_id' if 'image_id' in file_df.columns else ('file_name' if 'file_name' in file_df.columns else 'subject_id')
+            file_df = file_df.sort_values(sort_col).drop_duplicates('subject_id', keep='first').reset_index(drop=True)
+            method_desc = f"subject indexing fallback"
+
         print("\n" + "-" * 50)
-        print("  Step 0: Participant-Level Cohort De-duplication (Q1 Standard)")
+        print("  Step 0: Participant-Level Cohort De-duplication (Chronological Baseline)")
         print("-" * 50)
-        print(f"👥 Cohort Filtered: Exactly 1 baseline scan per participant.")
+        print(f"👥 Cohort Filtered: Exactly 1 baseline scan per participant via {method_desc}.")
         print(f"   Refined from {initial_count} longitudinal scans to {len(file_df)} unique participants.")
-        print(f"   Guarantees zero repeated-measures scan correlation across population graph nodes.")
+        print(f"   The one-scan-per-subject protocol eliminates within-subject repeated-measure dependence.")
 
     # Step 1: Patient-level split
     print("\n" + "-" * 50)

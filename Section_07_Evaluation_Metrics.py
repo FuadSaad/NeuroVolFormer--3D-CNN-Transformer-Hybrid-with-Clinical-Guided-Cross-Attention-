@@ -511,12 +511,19 @@ def compute_bootstrap_ci(
     boot_macro_auc = []
     class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
     boot_class_metrics = {c: {'precision': [], 'recall': [], 'f1': [], 'auc': []} for c in class_names}
-
     has_probs = all_probs is not None and len(all_probs) == n_samples
     from sklearn.metrics import roc_auc_score
 
+    # Class-Stratified Bootstrap Resampling: resample within each diagnostic class with replacement
+    # to guarantee all 4 classes are strictly preserved in every bootstrap replication (Issue 34)
+    class_indices = [np.where(all_labels == c)[0] for c in range(len(class_names))]
+
     for _ in range(n_bootstraps):
-        indices = np.random.choice(n_samples, n_samples, replace=True)
+        boot_idx_list = []
+        for c_idx in class_indices:
+            if len(c_idx) > 0:
+                boot_idx_list.append(np.random.choice(c_idx, size=len(c_idx), replace=True))
+        indices = np.concatenate(boot_idx_list)
         b_true = all_labels[indices]
         b_pred = all_preds[indices]
 
@@ -536,12 +543,11 @@ def compute_bootstrap_ci(
 
         if has_probs:
             b_prob = all_probs[indices]
-            if len(np.unique(b_true)) == len(class_names):
-                try:
-                    m_auc = roc_auc_score(b_true, b_prob, multi_class='ovr', average='macro')
-                    boot_macro_auc.append(m_auc)
-                except Exception:
-                    pass
+            try:
+                m_auc = roc_auc_score(b_true, b_prob, multi_class='ovr', average='macro')
+                boot_macro_auc.append(m_auc)
+            except Exception:
+                pass
             for idx, c in enumerate(class_names):
                 b_bin = (b_true == idx).astype(int)
                 if len(np.unique(b_bin)) == 2:
@@ -609,8 +615,8 @@ def compute_clinical_diagnostic_matrix(
     output_dir: str
 ) -> pd.DataFrame:
     """
-    Computes per-class clinical diagnostic utility metrics:
-    Sensitivity, Specificity, PPV (Precision), NPV, Balanced Accuracy, and DOR.
+    Computes per-class One-vs-Rest (OvR) clinical diagnostic utility metrics:
+    Sensitivity, Specificity, PPV (Precision), NPV, Balanced Accuracy, and Class-wise OvR DOR.
     Essential for Q1 / A* medical AI journal peer review.
     """
     cm = confusion_matrix(all_labels, all_preds)
@@ -637,14 +643,14 @@ def compute_clinical_diagnostic_matrix(
             'PPV / Precision (%)': round(ppv * 100, 2),
             'NPV (%)': round(npv * 100, 2),
             'Balanced Accuracy (%)': round(bal_acc * 100, 2),
-            'Diagnostic Odds Ratio': round(dor, 2)
+            'OvR Diagnostic Odds Ratio': round(dor, 2)
         })
 
     df_diag = pd.DataFrame(rows)
     csv_path = os.path.join(output_dir, 'table_clinical_diagnostic_metrics.csv')
     df_diag.to_csv(csv_path, index=False)
 
-    print("\n🏥 Per-Class Clinical Diagnostic Utility Matrix (IEEE TMI / MedIA Standard):")
+    print("\n🏥 Per-Class One-vs-Rest Clinical Diagnostic Utility Matrix (IEEE TMI / MedIA Standard):")
     print(df_diag.to_string(index=False))
 
     if getattr(Config, 'GENERATE_LATEX_TABLES', True):
@@ -653,15 +659,15 @@ def compute_clinical_diagnostic_matrix(
             r"\begin{table}[htbp]",
             r"\centering",
             r"\small",
-            r"\caption{Per-Class Clinical Diagnostic Utility Matrix for NeuroGAT under 5-Fold Cross-Validation.}",
+            r"\caption{Per-Class One-vs-Rest (OvR) Clinical Diagnostic Utility Matrix for NeuroGAT under 5-Fold Cross-Validation.}",
             r"\label{tab:clinical_diagnostic_metrics}",
             r"\begin{tabular}{lcccccc}",
             r"\toprule",
-            r"\textbf{Class} & \textbf{Sensitivity (\%)} & \textbf{Specificity (\%)} & \textbf{PPV (\%)} & \textbf{NPV (\%)} & \textbf{Balanced Acc (\%)} & \textbf{DOR} \\",
+            r"\textbf{Class} & \textbf{Sensitivity (\%)} & \textbf{Specificity (\%)} & \textbf{PPV (\%)} & \textbf{NPV (\%)} & \textbf{Balanced Acc (\%)} & \textbf{OvR DOR} \\",
             r"\midrule"
         ]
         for _, r in df_diag.iterrows():
-            lines.append(f"{r['Diagnostic Class']} & {r['Sensitivity (%)']:.2f} & {r['Specificity (%)']:.2f} & {r['PPV / Precision (%)']:.2f} & {r['NPV (%)']:.2f} & {r['Balanced Accuracy (%)']:.2f} & {r['Diagnostic Odds Ratio']:.2f} \\\\")
+            lines.append(f"{r['Diagnostic Class']} & {r['Sensitivity (%)']:.2f} & {r['Specificity (%)']:.2f} & {r['PPV / Precision (%)']:.2f} & {r['NPV (%)']:.2f} & {r['Balanced Accuracy (%)']:.2f} & {r['OvR Diagnostic Odds Ratio']:.2f} \\\\")
         lines.extend([
             r"\bottomrule",
             r"\end{tabular}",

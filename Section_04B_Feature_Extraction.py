@@ -93,10 +93,26 @@ class Native3DFeatureExtractor(nn.Module):
 
 
 def get_pretrained_densenet(device):
-    """Loads a 3D DenseNet from MONAI, or falls back to native PyTorch 3D extractor."""
+    """
+    Loads a 3D DenseNet from MONAI, or falls back to native PyTorch 3D extractor.
+    
+    Spatial Representation Learning Protocol:
+      - The spatial encoder must never be used as an untrained random feature extractor.
+      - If external pretrained weights are unavailable, the encoder may be initialized from external
+        biomedical checkpoints (e.g., MedicalNet / Med3D / MONAI Model Zoo) or self-supervised representations.
+      - During cross-validation, representation learning must be trained exclusively on the training partition;
+        supervised pretraining on the entire development cohort prior to fold-wise cross-validation is prohibited.
+    """
+    external_weights = getattr(Config, 'PRETRAINED_CNN_WEIGHTS', None)
+    
     if DenseNet121 is not None:
         try:
             model = DenseNet121(spatial_dims=3, in_channels=1, out_channels=4).to(device)
+            if external_weights and os.path.exists(external_weights):
+                print(f"📦 Loading external pretrained 3D DenseNet weights from: {external_weights}")
+                ckpt = torch.load(external_weights, map_location=device, weights_only=False)
+                state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
+                model.load_state_dict(state, strict=False)
             model.class_layers.out = nn.Identity()
             model.eval()
             return model
@@ -105,6 +121,14 @@ def get_pretrained_densenet(device):
 
     print("ℹ️ Using native PyTorch 3D CNN Feature Extractor (1024-D).")
     model = Native3DFeatureExtractor(out_dim=1024).to(device)
+    if external_weights and os.path.exists(external_weights):
+        try:
+            ckpt = torch.load(external_weights, map_location=device, weights_only=False)
+            state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
+            model.load_state_dict(state, strict=False)
+            print(f"📦 Loaded native 3D CNN weights from: {external_weights}")
+        except Exception as e:
+            print(f"⚠️ Could not load external weights: {e}")
     model.eval()
     return model
 
