@@ -214,14 +214,30 @@ class Config:
     TRANSFORMER_DROPOUT = 0.1         # Self/Cross-attention dropout
 
     # ── 3D Feature Extraction (Pre-trained + Radiomics) ──
+    BACKBONE_NAME = 'DenseNet121_3D'  # Locked single authoritative spatial feature backbone
     DEEP_FEATURE_DIM = 1024       # Dimension from 3D MONAI DenseNet121
     PCA_DIM = 64                  # Preserves 64 principal components of 3D spatial variance
     RADIOMICS_FEATURE_DIM = 68    # Standard PyRadiomics texture feature count
     REQUIRE_PRETRAINED_CNN = True # Enforce verified biomedical pretrained weights (MONAI / MedicalNet)
+    PRETRAINED_SEARCH_PATHS = [
+        'checkpoints/medical_densenet121_mri.pth',
+        'checkpoints/medical_densenet_mri.pth',
+        '/kaggle/input/medicalnet-resnet/medical_densenet121_mri.pth',
+        '/kaggle/input/monai-pretrained/medical_densenet121_mri.pth',
+    ]
     PRETRAINED_CNN_WEIGHTS = find_kaggle_path(
         ['medicalnet_resnet', 'densenet_pretrained', 'monai_densenet', 'densenet121', 'monai'],
         default=""
     )
+    RADIOMICS_SETTINGS = {
+        'binWidth': 25,
+        'resampledPixelSpacing': [1.0, 1.0, 1.0],
+        'interpolator': 'sitkBSpline',
+        'normalize': True,
+        'normalizeScale': 100,
+        'label': 1,
+        'correctMask': True
+    }
 
     # ── Graph Neural Network (NeuroGAT A* Edition) ──
     KNN_K = 5                     # Meso-scale neighborhood

@@ -476,7 +476,8 @@ class GNNTrainer:
                 probs_np,
                 cog_np,
                 risk_scores,
-                risk_strata
+                risk_strata,
+                logits[mask].cpu().numpy()
             )
 
     def fit(self, epochs: Optional[int] = None, patience: Optional[int] = None) -> Dict[str, Any]:
@@ -535,7 +536,7 @@ class GNNTrainer:
         best_checkpoint = torch.load(best_ckpt_path, weights_only=False)
         self.model.load_state_dict(best_checkpoint['model_state_dict'])
 
-        val_loss, val_acc, val_mae, val_preds, val_probs, val_cog, val_risk, val_strata = self.evaluate(self.graph.val_mask)
+        val_loss, val_acc, val_mae, val_preds, val_probs, val_cog, val_risk, val_strata, val_logits = self.evaluate(self.graph.val_mask)
         val_labels = self.graph.y[self.graph.val_mask].cpu().numpy()
 
         # Plot Fold Learning Curve
@@ -550,6 +551,7 @@ class GNNTrainer:
             'val_preds': val_preds,
             'val_probs': val_probs,
             'val_labels': val_labels,
+            'val_logits': val_logits,
             'val_cog_preds': val_cog,
             'val_risk_scores': val_risk,
             'val_risk_strata': val_strata,
@@ -647,6 +649,9 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     # Stage 1: 5-Fold Cross-Validation on Development Cohort
     # ═══════════════════════════════════════════════════════════════════
     cv_results = []
+    oof_val_logits = []
+    oof_val_labels = []
+    oof_pca_ev = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
         print(f"\n==================================================")
@@ -675,6 +680,10 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        # Track fold PCA explained variance
+        if hasattr(fold_graph, 'pca_explained_variance') and fold_graph.pca_explained_variance is not None:
+            oof_pca_ev.append(fold_graph.pca_explained_variance)
+
         # Train: Evaluate strictly on validation partition
         trainer = GNNTrainer(fold_graph, fold_idx, device)
         res = trainer.fit()
@@ -683,6 +692,8 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         print(f"\n🎯 Fold {fold_idx + 1} Best Val Acc: {res['best_val_acc']*100:.2f}% (Val Loss: {res['best_val_loss']:.4f})")
         print(f"⏱️ Fold Time: {fold_time:.1f} minutes")
 
+        oof_val_logits.append(res['val_logits'])
+        oof_val_labels.append(res['val_labels'])
         cv_results.append(res)
         del trainer
         del fold_graph
@@ -692,6 +703,22 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
     val_accs = [r['best_val_acc'] for r in cv_results]
     print(f"\n🏆 Mean Validation Accuracy Across 5 Folds: {np.mean(val_accs)*100:.2f}% ± {np.std(val_accs)*100:.2f}%")
+    if len(oof_pca_ev) > 0:
+        print(f"📊 PCA(64) Cumulative Explained Variance Across 5 Folds: {np.mean(oof_pca_ev):.2f}% ± {np.std(oof_pca_ev):.2f}%")
+
+    # Fit Post-Hoc Temperature Scaling on Out-of-Fold (OOF) Logits across all 5 folds
+    temp_scaler = None
+    try:
+        from Section_07_Evaluation_Metrics import TemperatureScaling
+        oof_all_logits = np.concatenate(oof_val_logits, axis=0)
+        oof_all_labels = np.concatenate(oof_val_labels, axis=0)
+        temp_scaler = TemperatureScaling()
+        temp_scaler.fit(oof_all_logits, oof_all_labels)
+        scaler_save_path = os.path.join(output_dir, 'results', 'temperature_scaler.pt')
+        torch.save({'temperature': float(temp_scaler.temperature)}, scaler_save_path)
+        print(f"🌡️ Temperature Scaling Calibrated on OOF Validation Logits: T* = {temp_scaler.temperature:.4f} (Saved to {scaler_save_path})")
+    except Exception as e:
+        print(f"ℹ️ Temperature Scaling Note: {e}")
 
     # Save CV results checkpoint
     os.makedirs(output_dir, exist_ok=True)
@@ -724,10 +751,23 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         pca_dim = getattr(Config, 'PCA_DIM', 64)
         final_pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
         final_pca.fit(dev_features[:, :1024])
+        final_ev = float(final_pca.explained_variance_ratio_.sum() * 100)
+        print(f"📊 Final Retraining PCA({pca_dim}) Explained Variance: {final_ev:.2f}% (Fit on {len(dev_features)} Dev participants)")
         joblib.dump(final_pca, os.path.join(output_dir, 'results', 'final_pca.joblib'))
         print(f"💾 Exported final PCA model to: {output_dir}/results/final_pca.joblib")
 
-    # Build final development graph
+        dev_deep_pca = final_pca.transform(dev_features[:, :1024])
+        dev_features_fused = np.concatenate([dev_deep_pca, dev_features[:, 1024:]], axis=1)
+    else:
+        dev_features_fused = dev_features.copy()
+
+    # Fit and export frozen StandardScaler
+    final_scaler = StandardScaler()
+    final_scaler.fit(dev_features_fused)
+    joblib.dump(final_scaler, os.path.join(output_dir, 'results', 'final_scaler.joblib'))
+    print(f"💾 Exported final StandardScaler to: {output_dir}/results/final_scaler.joblib")
+
+    # Build final graph with development-only fitted preprocessors (Strict Transductive Learning)
     final_graph = build_multiscale_population_graph(
         features, k_list=k_list, train_indices=train_val_indices
     ).to(device)
@@ -736,33 +776,24 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         final_graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1).to(device)
 
     final_graph.train_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
-    final_graph.val_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
-    final_graph.test_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
-
     final_graph.train_mask[train_val_indices] = True
+    final_graph.test_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
     final_graph.test_mask[test_indices] = True
 
-    # Fit and export frozen StandardScaler
-    final_scaler = StandardScaler()
-    final_scaler.fit(final_graph.x[final_graph.train_mask].cpu().numpy())
-    joblib.dump(final_scaler, os.path.join(output_dir, 'results', 'final_scaler.joblib'))
-    print(f"💾 Exported final StandardScaler to: {output_dir}/results/final_scaler.joblib")
+    final_trainer = GNNTrainer(final_graph, fold=999, device=device)
+    final_epochs = int(np.median([r.get('best_epoch', 50) for r in cv_results])) if len(cv_results) > 0 else 50
+    print(f"🚀 Retraining final model for {final_epochs} epochs on 100% development cohort...")
+    final_trainer.fit_development_final(epochs=final_epochs)
 
-    # Determine optimal epochs from CV history (median epoch reached by folds)
-    fold_epochs = [len(r['history']['val_loss']) for r in cv_results]
-    optimal_epochs = max(20, int(np.median(fold_epochs)))
-    print(f"⏱️ Retraining final model on 100% development set for {optimal_epochs} epochs (median CV convergence)...")
-
-    final_trainer = GNNTrainer(final_graph, fold_idx=0, device=device)
-    final_trainer.fit_development_final(epochs=optimal_epochs)
-
-    # Save final model checkpoint
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    # Save final retrained model checkpoint
     final_ckpt_path = os.path.join(checkpoint_dir, 'neurogat_final_model.pt')
     torch.save({
         'model_state_dict': final_trainer.model.state_dict(),
-        'optimal_epochs': optimal_epochs,
-        'mean_val_acc': np.mean(val_accs)
+        'feature_dim': final_graph.x.shape[1],
+        'epochs': final_epochs,
+        'knn_k_list': k_list,
+        'dev_indices': train_val_indices,
+        'test_indices': test_indices
     }, final_ckpt_path)
     torch.save({'model_state_dict': final_trainer.model.state_dict()}, os.path.join(checkpoint_dir, 'neurogat_best_model.pt'))
     print(f"💾 Exported final retrained model to: {final_ckpt_path}")
@@ -773,8 +804,19 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     print("\n" + "="*70)
     print("  STAGE 3: DEFINITIVE TEST EVALUATION (HELD-OUT TEST COHORT TEST-ONCE PROTOCOL)")
     print("="*70)
-    test_loss, test_acc, test_mae, test_preds, test_probs, test_cog, test_risk, test_strata = final_trainer.evaluate(final_graph.test_mask)
+    test_loss, test_acc, test_mae, test_preds, test_probs, test_cog, test_risk, test_strata, test_logits = final_trainer.evaluate(final_graph.test_mask)
     test_labels = final_graph.y[final_graph.test_mask].cpu().numpy()
+
+    # Apply frozen TemperatureScaling calibration if available
+    if temp_scaler is not None:
+        try:
+            calibrated_test_probs = temp_scaler.calibrate(test_logits)
+            print(f"✅ Calibrated Test Probabilities with Frozen T* = {temp_scaler.temperature:.4f}")
+        except Exception as e:
+            print(f"⚠️ Calibration evaluation note: {e}")
+            calibrated_test_probs = test_probs
+    else:
+        calibrated_test_probs = test_probs
 
     print(f"\n🎯 FINAL HELD-OUT TEST EVALUATION (N={len(test_indices)}):")
     print(f"   Accuracy: {test_acc*100:.2f}% | Loss: {test_loss:.4f} | Cognitive MAE: {test_mae:.4f}")
@@ -786,13 +828,15 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         'test_mae': test_mae,
         'test_preds': test_preds,
         'test_probs': test_probs,
+        'calibrated_probs': calibrated_test_probs,
+        'test_logits': test_logits,
         'test_labels': test_labels,
         'test_cog_preds': test_cog,
         'test_risk_scores': test_risk,
         'test_risk_strata': test_strata,
         'labels': test_labels,
         'preds': test_preds,
-        'probs': test_probs
+        'probs': calibrated_test_probs
     }
     torch.save(test_results, os.path.join(output_dir, 'results', 'final_test_predictions.pt'))
     print(f"💾 Exported final test predictions to: {output_dir}/results/final_test_predictions.pt")

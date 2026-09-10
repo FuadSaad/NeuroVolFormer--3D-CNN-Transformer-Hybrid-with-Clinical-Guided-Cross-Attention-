@@ -41,13 +41,14 @@ except ImportError:
 
 try:
     from Section_01_Setup_Configuration import Config
-
+    from Section_03_Preprocessing import preprocess_mri_volume
     from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
     from Section_06_Training_Engine import compute_mci_conversion_risk
 except Exception:
     if 'Config' not in globals() and 'Config' not in locals():
         class Config:
             pass
+    preprocess_mri_volume = None
 
 _defaults = {
     'SEED': 42,
@@ -107,6 +108,8 @@ class NeuroGATInferenceEngine:
         # Load reference cohort nodes if available
         self.ref_features = None
         self.ref_labels = None
+        self.ref_scaler = None
+        self.ref_graph = None
         self._load_reference_cohort()
 
         # Determine feature input dimension: Exactly 64 PCA + 68 Radiomics + 6 Demographics = 138-D
@@ -122,11 +125,19 @@ class NeuroGATInferenceEngine:
         f_path = os.path.join(Config.OUTPUT_DIR, 'node_features.npy')
         l_path = os.path.join(Config.OUTPUT_DIR, 'node_labels.npy')
         pca_path = os.path.join(Config.OUTPUT_DIR, 'results', 'final_pca.joblib')
+        scaler_path = os.path.join(Config.OUTPUT_DIR, 'results', 'final_scaler.joblib')
 
         try:
             import joblib
         except ImportError:
             joblib = None
+
+        if joblib and os.path.exists(scaler_path):
+            try:
+                self.ref_scaler = joblib.load(scaler_path)
+                print(f"📦 Loading frozen training StandardScaler from {scaler_path}")
+            except Exception as e:
+                print(f"ℹ️ Could not load final_scaler: {e}")
 
         if os.path.exists(f_path) and os.path.exists(l_path):
             try:
@@ -274,24 +285,55 @@ class NeuroGATInferenceEngine:
         """
         patient_vec = self._prepare_patient_feature_vector(clinical_dict, imaging_features)
 
-        # Build transductive graph context: inject query node into reference population manifold
+        # Build transductive graph context: attach query node without mutating reference graph topology
         if self.ref_features is not None:
-            full_raw = np.vstack([self.ref_features, patient_vec])
             ref_n = len(self.ref_features)
-            train_indices = list(range(ref_n))
             k_list = getattr(Config, 'KNN_K_LIST', [3, 5, 10])
 
-            # Construct multi-scale population graph with query patient attached at index ref_n
-            graph_data = build_multiscale_population_graph(
-                full_raw,
-                k_list=k_list,
-                train_indices=train_indices
-            ).to(self.device)
+            # Cache the reference population graph once (topology is strictly immutable)
+            if self.ref_graph is None:
+                print(f"🔗 Caching immutable reference population graph ({ref_n} nodes)...")
+                self.ref_graph = build_multiscale_population_graph(
+                    self.ref_features,
+                    k_list=k_list,
+                    train_indices=list(range(ref_n))
+                ).to(self.device)
 
-            query_idx = ref_n
-            x_tensor = graph_data.x
-            edge_index = graph_data.edge_index
-            edge_attr = getattr(graph_data, 'edge_attr', None)
+            # Normalize patient feature vector using frozen reference scaler
+            if self.ref_scaler is not None:
+                try:
+                    norm_patient = self.ref_scaler.transform(patient_vec)
+                except Exception:
+                    norm_patient = patient_vec
+            else:
+                norm_patient = patient_vec
+
+            query_x = torch.tensor(norm_patient, dtype=torch.float32, device=self.device)
+            ref_x = self.ref_graph.x
+            query_idx = ref_x.size(0)
+
+            # Connect query node to top-k reference nodes using cosine similarity
+            # (Reference-to-reference topology remains 100% frozen and immutable)
+            sims = F.cosine_similarity(ref_x, query_x, dim=1)
+            knn_k = getattr(Config, 'KNN_K', 5)
+            topk_vals, topk_indices = torch.topk(sims, k=min(knn_k, ref_x.size(0)))
+
+            q_src = []
+            q_dst = []
+            q_weights = []
+            for n_idx, weight in zip(topk_indices.tolist(), topk_vals.tolist()):
+                w_val = max(float(weight), 0.01)
+                q_src.extend([query_idx, n_idx])
+                q_dst.extend([n_idx, query_idx])
+                q_weights.extend([w_val, w_val])
+
+            new_edges = torch.tensor([q_src, q_dst], dtype=torch.long, device=self.device)
+            new_weights = torch.tensor(q_weights, dtype=torch.float32, device=self.device).unsqueeze(1)
+
+            # Concatenate features and edges without mutating existing reference graph
+            x_tensor = torch.cat([ref_x, query_x], dim=0)
+            edge_index = torch.cat([self.ref_graph.edge_index, new_edges], dim=1)
+            edge_attr = torch.cat([self.ref_graph.edge_attr, new_weights], dim=0) if self.ref_graph.edge_attr is not None else new_weights
         else:
             # Self-loop graph for standalone query node
             query_idx = 0

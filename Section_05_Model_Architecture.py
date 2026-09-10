@@ -94,8 +94,13 @@ def build_multiscale_population_graph(
             print("🛡️  Fold Isolation: Fitting PCA strictly on training fold indices...")
             pca.fit(deep_features[train_indices])
             deep_features_pca = pca.transform(deep_features)
+            n_fit = len(train_indices)
         else:
             deep_features_pca = pca.fit_transform(deep_features)
+            n_fit = len(deep_features)
+
+        ev_sum = float(pca.explained_variance_ratio_.sum() * 100)
+        print(f"📊 Empirical PCA({pca_dim}) Cumulative Explained Variance: {ev_sum:.2f}% (Fit on {n_fit} patients)")
 
         features = np.concatenate([deep_features_pca, handcrafted], axis=1)
         print(f"📊 New Feature Shape after PCA Fusion: {features.shape}")
@@ -148,6 +153,8 @@ def build_multiscale_population_graph(
     x = torch.tensor(features_norm, dtype=torch.float32)
 
     graph_data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight)
+    if 'ev_sum' in locals():
+        graph_data.pca_explained_variance = ev_sum
     print(f"✅ Multi-Scale Graph constructed: {graph_data.num_nodes} nodes, {graph_data.num_edges} edges.")
     return graph_data
 

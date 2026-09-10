@@ -153,24 +153,17 @@ def run_ml_baselines(features_path: str, labels_path: str):
     fold_splits = splits_data['fold_splits']
     test_indices = splits_data['test_indices']
     train_val_indices = [i for i in range(len(X_raw)) if i not in set(test_indices)]
+    n_dev = len(train_val_indices)
+    n_test = len(test_indices)
+    print(f"👥 Cohort Partitions: {n_dev} Development participants (80%) | {n_test} Held-Out Test participants (20%).")
 
-    # Standardize input representation to match NeuroGAT symmetrically
-    if X_raw.shape[1] >= 1024:
-        pca_dim = getattr(Config, 'PCA_DIM', 64)
-        pca = PCA(n_components=pca_dim, random_state=Config.SEED)
-        pca.fit(X_raw[train_val_indices, :1024])
-        deep_pca = pca.transform(X_raw[:, :1024])
-        handcrafted_and_clin = X_raw[:, 1024:]
-        X = np.concatenate([deep_pca, handcrafted_and_clin], axis=1)
-        print(f"📊 Symmetrical Modality Parity: 3D PCA ({pca_dim}) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
-    else:
-        X = X_raw.copy()
+    pca_dim = getattr(Config, 'PCA_DIM', 64)
 
     print("🛡️ Benchmark Protocol: All models receive the same subject-level input modalities and leakage-free")
     print("   feature information. Graph-based models additionally exploit inter-subject relational structure,")
     print("   while conventional baselines operate on the corresponding tabular feature representation.")
 
-    # Define Standardized, Well-Regularized Baseline Models
+    # Define Standardized, Well-Regularized Baseline Models with Compact Controlled Grids
     models = {
         'SVM (RBF)': SVC(kernel='rbf', C=1.0, probability=True, random_state=Config.SEED),
         'Random Forest': RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_split=5, random_state=Config.SEED, n_jobs=-1),
@@ -213,85 +206,115 @@ def run_ml_baselines(features_path: str, labels_path: str):
     baseline_evals = []
     mcnemar_raw_p = []
 
-    print("\n🔄 Running 5-Fold Patient-Level CV with Strict Fold-Wise Isolation...\n")
+    base_pred_dir = os.path.join(Config.OUTPUT_DIR, 'baseline_predictions')
+    os.makedirs(base_pred_dir, exist_ok=True)
+
+    print("\n🔄 Running 5-Fold Patient-Level CV with Strict Out-of-Fold Validation...\n")
 
     for model_name, model in models.items():
         print(f"==================================================")
         print(f"  ▶️ Training {model_name}...")
         print(f"==================================================")
 
-        all_labels = []
-        all_preds = []
-        all_probs = []
+        all_val_labels = []
+        all_val_preds = []
+        all_val_probs = []
         fold_accs = []
+        fold_evs = []
 
+        # ── Stage 1: 5-Fold Cross-Validation on Development Cohort ──
         for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
-            # Strict Fold-Wise Preprocessing (Point 7: Zero Baseline Leakage)
+            # Strict Fold-Wise Preprocessing (Fit on train_idx, Transform val_idx)
             if X_raw.shape[1] >= 1024:
-                pca_dim = getattr(Config, 'PCA_DIM', 64)
                 pca = PCA(n_components=pca_dim, random_state=Config.SEED)
                 X_train_deep = pca.fit_transform(X_raw[train_idx, :1024])
-                X_test_deep = pca.transform(X_raw[test_indices, :1024])
+                X_val_deep = pca.transform(X_raw[val_idx, :1024])
+                ev = float(pca.explained_variance_ratio_.sum() * 100)
+                fold_evs.append(ev)
+
                 X_train = np.concatenate([X_train_deep, X_raw[train_idx, 1024:]], axis=1)
-                X_test = np.concatenate([X_test_deep, X_raw[test_indices, 1024:]], axis=1)
+                X_val = np.concatenate([X_val_deep, X_raw[val_idx, 1024:]], axis=1)
             else:
                 X_train = X_raw[train_idx].copy()
-                X_test = X_raw[test_indices].copy()
+                X_val = X_raw[val_idx].copy()
 
             scaler = StandardScaler()
             X_train = scaler.fit_transform(X_train)
-            X_test = scaler.transform(X_test)
+            X_val = scaler.transform(X_val)
             y_train = y[train_idx]
-            y_test = y[test_indices]
+            y_val = y[val_idx]
 
             model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            probs = model.predict_proba(X_test)
+            preds_val = model.predict(X_val)
+            probs_val = model.predict_proba(X_val)
 
-            acc = accuracy_score(y_test, preds)
+            acc = accuracy_score(y_val, preds_val)
             fold_accs.append(acc)
 
-            all_labels.extend(y_test)
-            all_preds.extend(preds)
-            all_probs.extend(probs)
+            all_val_labels.extend(y_val)
+            all_val_preds.extend(preds_val)
+            all_val_probs.extend(probs_val)
 
-            print(f"   Fold {fold_idx + 1} Acc: {acc * 100:.2f}%")
+            ev_str = f" | PCA EV: {fold_evs[-1]:.1f}%" if fold_evs else ""
+            print(f"   Fold {fold_idx + 1} Val Acc: {acc * 100:.2f}%{ev_str}")
 
-        all_labels = np.array(all_labels)
-        all_preds = np.array(all_preds)
-        all_probs = np.array(all_probs)
+        all_val_labels = np.array(all_val_labels)
+        all_val_preds = np.array(all_val_preds)
+        all_val_probs = np.array(all_val_probs)
 
-        # Save Random Forest probabilities as representative ML baseline for DeLong testing
+        mean_cv_acc = np.mean(fold_accs) * 100
+        std_cv_acc = np.std(fold_accs) * 100
+        prec, rec, f1, _ = precision_recall_fscore_support(all_val_labels, all_val_preds, average='weighted')
+        print(f"📊 {model_name} 5-Fold CV Mean: {mean_cv_acc:.2f}% ± {std_cv_acc:.2f}% | Macro F1: {f1 * 100:.2f}%")
+
+        # ── Stage 2 & 3: Retrain on 100% Development Cohort & Evaluate Once on Held-Out Test ──
+        print(f"   Retraining {model_name} on 100% Development Cohort (N={n_dev})...")
+        if X_raw.shape[1] >= 1024:
+            final_pca_base = PCA(n_components=pca_dim, random_state=Config.SEED)
+            X_dev_deep = final_pca_base.fit_transform(X_raw[train_val_indices, :1024])
+            X_test_deep = final_pca_base.transform(X_raw[test_indices, :1024])
+            X_dev = np.concatenate([X_dev_deep, X_raw[train_val_indices, 1024:]], axis=1)
+            X_test = np.concatenate([X_test_deep, X_raw[test_indices, 1024:]], axis=1)
+        else:
+            X_dev = X_raw[train_val_indices].copy()
+            X_test = X_raw[test_indices].copy()
+
+        scaler_base = StandardScaler()
+        X_dev = scaler_base.fit_transform(X_dev)
+        X_test = scaler_base.transform(X_test)
+
+        model.fit(X_dev, y[train_val_indices])
+        test_preds = model.predict(X_test)
+        test_probs = model.predict_proba(X_test)
+        test_acc = accuracy_score(y[test_indices], test_preds) * 100
+        print(f"🎯 {model_name} Held-Out Test Acc (Test-Once, N={n_test}): {test_acc:.2f}%")
+
+        # Serialize predictions for DeLong testing & independent verification
+        model_slug = model_name.lower().replace(' ', '_').replace('(', '').replace(')', '')
+        np.save(os.path.join(base_pred_dir, f'{model_slug}_test_probs.npy'), test_probs)
+        np.save(os.path.join(base_pred_dir, f'{model_slug}_test_preds.npy'), test_preds)
         if 'Random Forest' in model_name:
-            np.save(os.path.join(Config.OUTPUT_DIR, 'baseline_test_probs.npy'), all_probs)
+            np.save(os.path.join(Config.OUTPUT_DIR, 'baseline_test_probs.npy'), test_probs)
 
-        # Calculate Comprehensive Performance Metrics
-        overall_acc = (all_preds == all_labels).mean() * 100
-        prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
-
-        # Edwards' continuity-corrected McNemar test (Point 24: No t-test substitution)
+        # Edwards' continuity-corrected McNemar test on held-out test predictions
         p_mcnemar = None
-        if gnn_preds is not None and len(gnn_preds) == len(all_preds):
-            _, p_mcnemar = compute_mcnemar_test(all_labels, gnn_preds, all_preds)
-        elif gnn_preds is not None and len(all_preds) % len(gnn_preds) == 0:
-            rep = len(all_preds) // len(gnn_preds)
-            _, p_mcnemar = compute_mcnemar_test(all_labels, np.tile(gnn_preds, rep), all_preds)
+        if gnn_preds is not None and len(gnn_preds) == len(test_preds):
+            _, p_mcnemar = compute_mcnemar_test(y[test_indices], gnn_preds, test_preds)
 
         mcnemar_raw_p.append(p_mcnemar)
         baseline_evals.append({
             'Category': 'Machine Learning',
             'Baseline Model': model_name,
-            'Accuracy': f"{overall_acc:.2f}%",
+            'Accuracy': f"{mean_cv_acc:.2f}% ± {std_cv_acc:.2f}%",
             'Precision': f"{prec * 100:.2f}%",
             'Recall': f"{rec * 100:.2f}%",
             'F1-Score': f"{f1 * 100:.2f}%",
+            'Test Acc': f"{test_acc:.2f}%",
             'raw_p': p_mcnemar
         })
 
-        print(f"\n📊 {model_name} Overall 5-Fold Acc: {overall_acc:.2f}% | F1: {f1 * 100:.2f}%\n")
-
-        plot_model_confusion_matrix(all_labels, all_preds, model_name)
-        plot_model_roc_curve(all_labels, all_probs, model_name)
+        plot_model_confusion_matrix(all_val_labels, all_val_preds, model_name)
+        plot_model_roc_curve(all_val_labels, all_val_probs, model_name)
 
     # Apply Holm-Bonferroni Correction if paired tests were valid
     valid_p = [p for p in mcnemar_raw_p if p is not None]

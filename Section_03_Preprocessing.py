@@ -112,8 +112,11 @@ def discover_nifti_files(data_paths: dict, csv_paths: dict) -> pd.DataFrame:
 
     df = pd.DataFrame(all_records)
     print(f"\n✅ Total NIfTI files discovered: {len(df)}")
-    print(f"   Per class: {dict(df['label'].value_counts())}")
-    print(f"   Unique subjects: {df['subject_id'].nunique()}")
+    if len(df) > 0 and 'label' in df.columns:
+        print(f"   Per class: {dict(df['label'].value_counts())}")
+        print(f"   Unique subjects: {df['subject_id'].nunique()}")
+    else:
+        print("   (No raw volumes discovered in local directories)")
 
     return df
 
@@ -332,6 +335,10 @@ def preprocess_single_volume(
         return None
 
 
+# Canonical export for Inference App and downstream pipelines
+preprocess_mri_volume = preprocess_single_volume
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 3.9 Batch Preprocessing Pipeline
 # ═══════════════════════════════════════════════════════════════════
@@ -514,8 +521,8 @@ def run_preprocessing():
     print(f"\n✅ Section 3 Complete - All volumes preprocessed!")
     return processed_df
 
-# Run preprocessing
-processed_df = run_preprocessing()
+if __name__ == "__main__":
+    processed_df = run_preprocessing()
 
 # Entrypoint alias for run_pipeline
 main = run_preprocessing
