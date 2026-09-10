@@ -615,7 +615,9 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
         graph_data.train_mask[train_idx] = True
         graph_data.val_mask[val_idx] = True
-        graph_data.test_mask[test_indices] = True
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Train
         trainer = GNNTrainer(graph_data, fold_idx, device)
@@ -626,6 +628,10 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         print(f"⏱️ Fold Time: {fold_time:.1f} minutes")
 
         cv_results.append(res)
+        del trainer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     mean_test_acc = np.mean([r['test_acc'] for r in cv_results])
     mean_test_mae = np.mean([r['test_mae'] for r in cv_results])

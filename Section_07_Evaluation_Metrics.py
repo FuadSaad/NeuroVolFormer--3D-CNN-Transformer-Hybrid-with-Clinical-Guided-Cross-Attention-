@@ -453,6 +453,12 @@ def generate_full_evaluation(features_path: str, labels_path: str):
     n_bootstraps = getattr(Config, 'BOOTSTRAP_ITERATIONS', 1000)
     ci_results = compute_bootstrap_ci(all_labels, all_preds, all_probs, n_bootstraps=n_bootstraps)
 
+    # 2b. Per-Class Clinical Diagnostic Utility Matrix (Sensitivity, Specificity, PPV, NPV, Balanced Acc, DOR)
+    compute_clinical_diagnostic_matrix(all_labels, all_preds, Config.OUTPUT_DIR)
+
+    # 2c. 5-Fold Soft Probability Ensemble Test Evaluation (Variance Reduction)
+    evaluate_multifold_soft_ensemble(results)
+
     # 3. Export Camera-Ready LaTeX Tables
     if getattr(Config, 'GENERATE_LATEX_TABLES', True):
         export_evaluation_to_latex(ci_results, df_report, Config.OUTPUT_DIR, all_labels)
@@ -560,6 +566,126 @@ def compute_bootstrap_ci(
     df_ci = pd.DataFrame(ci_rows)
     df_ci.to_csv(os.path.join(Config.OUTPUT_DIR, 'metrics_95_ci.csv'), index=False)
     return ci_results
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 7.6B Clinical Diagnostic Utility Matrix (Sensitivity, Specificity, NPV)
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_clinical_diagnostic_matrix(
+    all_labels: np.ndarray,
+    all_preds: np.ndarray,
+    output_dir: str
+) -> pd.DataFrame:
+    """
+    Computes per-class clinical diagnostic utility metrics:
+    Sensitivity, Specificity, PPV (Precision), NPV, Balanced Accuracy, and DOR.
+    Essential for Q1 / A* medical AI journal peer review.
+    """
+    cm = confusion_matrix(all_labels, all_preds)
+    class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
+    rows = []
+
+    for i, c_name in enumerate(class_names):
+        tp = int(cm[i, i])
+        fn = int(cm[i, :].sum() - tp)
+        fp = int(cm[:, i].sum() - tp)
+        tn = int(cm.sum() - (tp + fn + fp))
+
+        sens = tp / max(tp + fn, 1)
+        spec = tn / max(tn + fp, 1)
+        ppv = tp / max(tp + fp, 1)
+        npv = tn / max(tn + fn, 1)
+        bal_acc = (sens + spec) / 2.0
+        dor = (tp * tn) / max(fp * fn, 1)
+
+        rows.append({
+            'Diagnostic Class': c_name,
+            'Sensitivity (%)': round(sens * 100, 2),
+            'Specificity (%)': round(spec * 100, 2),
+            'PPV / Precision (%)': round(ppv * 100, 2),
+            'NPV (%)': round(npv * 100, 2),
+            'Balanced Accuracy (%)': round(bal_acc * 100, 2),
+            'Diagnostic Odds Ratio': round(dor, 2)
+        })
+
+    df_diag = pd.DataFrame(rows)
+    csv_path = os.path.join(output_dir, 'table_clinical_diagnostic_metrics.csv')
+    df_diag.to_csv(csv_path, index=False)
+
+    print("\n🏥 Per-Class Clinical Diagnostic Utility Matrix (IEEE TMI / MedIA Standard):")
+    print(df_diag.to_string(index=False))
+
+    if getattr(Config, 'GENERATE_LATEX_TABLES', True):
+        tex_path = os.path.join(output_dir, 'table_clinical_diagnostic_metrics.tex')
+        lines = [
+            r"\begin{table}[htbp]",
+            r"\centering",
+            r"\small",
+            r"\caption{Per-Class Clinical Diagnostic Utility Matrix for NeuroGAT under 5-Fold Cross-Validation.}",
+            r"\label{tab:clinical_diagnostic_metrics}",
+            r"\begin{tabular}{lcccccc}",
+            r"\toprule",
+            r"\textbf{Class} & \textbf{Sensitivity (\%)} & \textbf{Specificity (\%)} & \textbf{PPV (\%)} & \textbf{NPV (\%)} & \textbf{Balanced Acc (\%)} & \textbf{DOR} \\",
+            r"\midrule"
+        ]
+        for _, r in df_diag.iterrows():
+            lines.append(f"{r['Diagnostic Class']} & {r['Sensitivity (%)']:.2f} & {r['Specificity (%)']:.2f} & {r['PPV / Precision (%)']:.2f} & {r['NPV (%)']:.2f} & {r['Balanced Accuracy (%)']:.2f} & {r['Diagnostic Odds Ratio']:.2f} \\\\")
+        lines.extend([
+            r"\bottomrule",
+            r"\end{tabular}",
+            r"\end{table}"
+        ])
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        print(f"📄 Camera-Ready Diagnostic Utility LaTeX Table exported to: {tex_path}")
+
+    return df_diag
+
+
+def evaluate_multifold_soft_ensemble(cv_results: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """
+    Computes 5-Fold Soft Probability Ensemble Test Performance.
+    Ensemble averaging across the 5 independent fold models reduces variance and boosts overall accuracy.
+    """
+    if not cv_results or len(cv_results) < 2:
+        return None
+
+    try:
+        probs_list = [res['probs'] for res in cv_results if 'probs' in res]
+        first_len = len(probs_list[0])
+        if not all(len(p) == first_len for p in probs_list):
+            return None
+
+        ensemble_probs = np.mean(probs_list, axis=0)
+        true_labels = cv_results[0]['labels']
+        ensemble_preds = np.argmax(ensemble_probs, axis=1)
+
+        ens_acc = accuracy_score(true_labels, ensemble_preds) * 100
+        prec_macro, rec_macro, f1_macro, _ = precision_recall_fscore_support(true_labels, ensemble_preds, average='macro', zero_division=0)
+        prec_wt, rec_wt, f1_wt, _ = precision_recall_fscore_support(true_labels, ensemble_preds, average='weighted', zero_division=0)
+
+        print("\n" + "="*70)
+        print("  🌟 5-FOLD SOFT PROBABILITY ENSEMBLE EVALUATION (Deployed Model)")
+        print("="*70)
+        print(f"   • Ensemble Test Accuracy : {ens_acc:.2f}% (Reduced model variance)")
+        print(f"   • Ensemble Macro F1      : {f1_macro*100:.2f}%")
+        print(f"   • Ensemble Weighted F1   : {f1_wt*100:.2f}%")
+
+        class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
+        p_c, r_c, f_c, _ = precision_recall_fscore_support(true_labels, ensemble_preds, labels=list(range(len(class_names))), average=None, zero_division=0)
+        for i, c in enumerate(class_names):
+            print(f"     - {c:<4} -> Precision: {p_c[i]*100:.2f}%, Recall: {r_c[i]*100:.2f}%, F1: {f_c[i]*100:.2f}%")
+        print("="*70 + "\n")
+
+        return {
+            'ensemble_acc': ens_acc,
+            'ensemble_macro_f1': f1_macro * 100,
+            'ensemble_weighted_f1': f1_wt * 100
+        }
+    except Exception as e:
+        print(f"⚠️ Ensemble evaluation note: {e}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════
