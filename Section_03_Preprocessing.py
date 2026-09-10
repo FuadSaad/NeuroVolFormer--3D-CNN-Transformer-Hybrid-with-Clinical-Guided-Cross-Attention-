@@ -22,6 +22,11 @@ except ImportError:
     nib = None
 
 try:
+    from skimage import filters
+except ImportError:
+    filters = None
+
+try:
     from Section_01_Setup_Configuration import Config
 except (ImportError, ModuleNotFoundError):
     pass
@@ -160,8 +165,20 @@ def remove_background_and_clip(volume: np.ndarray) -> Tuple[np.ndarray, np.ndarr
     and mask out the background.
     """
     # Create basic background mask (Otsu) without morphology
-    threshold = filters.threshold_otsu(volume[volume > 0])
-    binary_mask = volume > (threshold * 0.2)  # Low threshold just to capture the head
+    pos_voxels = volume[volume > 0]
+    if len(pos_voxels) == 0:
+        return volume, np.ones_like(volume, dtype=bool)
+
+    if filters is not None:
+        try:
+            threshold = float(filters.threshold_otsu(pos_voxels))
+            binary_mask = volume > (threshold * 0.2)  # Low threshold just to capture the head
+        except Exception:
+            threshold = float(np.percentile(pos_voxels, 15))
+            binary_mask = volume > threshold
+    else:
+        threshold = float(np.percentile(pos_voxels, 15))
+        binary_mask = volume > threshold
 
     # Clip extreme intensities (remove bright artifacts)
     non_zero = volume[binary_mask]

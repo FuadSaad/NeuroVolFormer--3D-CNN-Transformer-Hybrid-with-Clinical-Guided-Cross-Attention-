@@ -199,6 +199,10 @@ def run_ml_baselines(features_path: str, labels_path: str):
         all_preds = np.array(all_preds)
         all_probs = np.array(all_probs)
 
+        # Save Random Forest probabilities as representative ML baseline for DeLong significance testing
+        if 'Random Forest' in model_name:
+            np.save(os.path.join(Config.OUTPUT_DIR, 'baseline_test_probs.npy'), all_probs)
+
         # Calculate Comprehensive Performance Metrics
         overall_acc = (all_preds == all_labels).mean() * 100
         prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
