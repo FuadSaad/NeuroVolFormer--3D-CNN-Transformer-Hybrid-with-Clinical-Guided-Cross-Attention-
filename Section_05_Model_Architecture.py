@@ -56,17 +56,22 @@ def build_multiscale_population_graph(
     features: np.ndarray,
     labels: np.ndarray,
     k_list: List[int] = [3, 5, 10],
-    cognitive_scores: Optional[np.ndarray] = None
+    cognitive_scores: Optional[np.ndarray] = None,
+    train_indices: Optional[Union[List[int], np.ndarray]] = None
 ) -> Data:
     """
     Constructs a Multi-Scale Population Graph (PyG Data) integrating micro-, meso-,
-    and macro-scale phenotypic patient manifolds.
+    and macro-scale phenotypic patient manifolds under Transductive Graph Learning 
+    (Parisot et al., MICCAI 2017 & Medical Image Analysis 2018).
 
     Args:
         features: (N, D) multimodal patient feature matrix (Deep + Radiomics + Clinical).
         labels: (N,) diagnostic class labels (0: AD, 1: CN, 2: EMCI, 3: LMCI).
         k_list: List of neighbor scales (default: [3, 5, 10]).
         cognitive_scores: (N,) continuous cognitive scores (MMSE or CDR-SB), if available.
+        train_indices: Optional indices of training nodes. When provided, PCA and 
+                       StandardScaler are strictly fit on train_indices and then used to 
+                       transform validation and test nodes (Zero Distribution Leakage).
 
     Returns:
         torch_geometric.data.Data object containing x, edge_index, edge_attr, y, and optional cog_y.
@@ -83,14 +88,24 @@ def build_multiscale_population_graph(
 
         print("🧠 Applying PCA to Deep Features (1024 -> 32 dims)...")
         pca = PCA(n_components=32, random_state=42)
-        deep_features_pca = pca.fit_transform(deep_features)
+        if train_indices is not None and len(train_indices) > 0:
+            print("🛡️  Fold Isolation: Fitting PCA strictly on training fold indices...")
+            pca.fit(deep_features[train_indices])
+            deep_features_pca = pca.transform(deep_features)
+        else:
+            deep_features_pca = pca.fit_transform(deep_features)
 
         features = np.concatenate([deep_features_pca, handcrafted], axis=1)
         print(f"📊 New Feature Shape after PCA Fusion: {features.shape}")
 
-    # 3. Standardize features
+    # 3. Standardize features (Fold-Wise Strict Isolation)
     scaler = StandardScaler()
-    features_norm = scaler.fit_transform(features)
+    if train_indices is not None and len(train_indices) > 0:
+        print("🛡️  Fold Isolation: Fitting StandardScaler strictly on training fold indices...")
+        scaler.fit(features[train_indices])
+        features_norm = scaler.transform(features)
+    else:
+        features_norm = scaler.fit_transform(features)
 
     # 4. Multi-Scale Affinity Graph Construction
     max_k = max(k_list)
@@ -138,9 +153,9 @@ def build_multiscale_population_graph(
     return graph_data
 
 
-def build_population_graph(features: np.ndarray, labels: np.ndarray, k: int = 5) -> Data:
+def build_population_graph(features: np.ndarray, labels: np.ndarray, k: int = 5, train_indices: Optional[Any] = None) -> Data:
     """Backward-compatible wrapper defaulting to multi-scale population graph."""
-    return build_multiscale_population_graph(features, labels, k_list=[3, k, 10])
+    return build_multiscale_population_graph(features, labels, k_list=[3, k, 10], train_indices=train_indices)
 
 
 
@@ -313,14 +328,14 @@ class NeuroGAT(nn.Module):
         self.res1 = nn.Linear(in_channels, hidden_dim * heads)
         self.res2 = nn.Linear(hidden_dim * heads, hidden_dim)
 
-        # Batch Normalization for stable convergence
-        self.bn1 = nn.BatchNorm1d(hidden_dim * heads)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
+        # Layer Normalization for stable convergence with ZERO cross-node distribution leakage
+        self.bn1 = nn.LayerNorm(hidden_dim * heads)
+        self.bn2 = nn.LayerNorm(hidden_dim)
 
         # 4a. Task 1 Head: Diagnostic Classifier (4 Classes)
         self.classifier = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
             nn.LeakyReLU(0.2),
             nn.Dropout(self.classifier_dropout),
             nn.Linear(hidden_dim // 2, num_classes)

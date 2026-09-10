@@ -474,10 +474,16 @@ class GNNTrainer:
             self.history['val_acc'].append(val_acc)
             self.history['val_mae'].append(val_mae)
 
-            # Save best checkpoint based on validation accuracy and loss
-            if val_acc > self.best_val_acc or (val_acc == self.best_val_acc and val_loss < self.best_val_loss):
-                self.best_val_acc = val_acc
+            # Save best checkpoint strictly based on validation loss to halt overfitting
+            improved = False
+            if val_loss < self.best_val_loss - 1e-4:
+                improved = True
+            elif abs(val_loss - self.best_val_loss) <= 1e-4 and val_acc > self.best_val_acc:
+                improved = True
+
+            if improved:
                 self.best_val_loss = val_loss
+                self.best_val_acc = val_acc
                 self.best_model_wts = copy.deepcopy(self.model.state_dict())
                 self.patience_counter = 0
                 torch.save({
@@ -496,7 +502,7 @@ class GNNTrainer:
                 print(f"Epoch {epoch:03d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc*100:.2f}% | Val Loss: {val_loss:.4f} | Val Acc: {val_acc*100:.2f}% | Cog MAE: {val_mae:.4f} {star}")
 
             if self.patience_counter >= patience:
-                print(f"⏹️ Early stopping triggered at epoch {epoch}")
+                print(f"⏹️ Early stopping triggered at epoch {epoch} (Validation loss halted improving)")
                 break
 
         # Load best model weights for test evaluation
@@ -510,6 +516,7 @@ class GNNTrainer:
         self._plot_learning_curve()
 
         return {
+            'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
             'test_acc': test_acc,
             'test_loss': test_loss,
@@ -585,11 +592,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     if cog_scores is not None:
         print(f"🧠 Loaded Ground-Truth Continuous Cognitive Impairment Scores: {cog_scores.shape}")
 
-    # 2. Build Multi-Scale Population Graph (K=[3, 5, 10])
-    k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
-    graph_data = build_multiscale_population_graph(features, labels, k_list=k_list, cognitive_scores=cog_scores).to(device)
-
-    # 3. Load Patient Splits
+    # 2. Load Patient Splits
     splits_path = os.path.join(output_dir, 'results', 'splits.pt')
     if not os.path.exists(splits_path):
         print(f"❌ Error: splits.pt not found at {splits_path}")
@@ -598,6 +601,8 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     splits_data = torch.load(splits_path, weights_only=False)
     test_indices = splits_data['test_indices']
     fold_splits = splits_data['fold_splits']
+
+    k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
 
     cv_results = []
 
@@ -608,49 +613,55 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
         t0 = time.time()
 
-        # Create masks on GPU
-        graph_data.train_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
-        graph_data.val_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
-        graph_data.test_mask = torch.zeros(graph_data.num_nodes, dtype=torch.bool).to(device)
+        # Build fold-isolated graph: PCA & StandardScaler fit strictly on train_idx (Zero Leakage)
+        fold_graph = build_multiscale_population_graph(
+            features, labels, k_list=k_list, cognitive_scores=cog_scores, train_indices=train_idx
+        ).to(device)
 
-        graph_data.train_mask[train_idx] = True
-        graph_data.val_mask[val_idx] = True
-        graph_data.test_mask[test_indices] = True
+        # Create masks on GPU
+        fold_graph.train_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
+        fold_graph.val_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
+        fold_graph.test_mask = torch.zeros(fold_graph.num_nodes, dtype=torch.bool).to(device)
+
+        fold_graph.train_mask[train_idx] = True
+        fold_graph.val_mask[val_idx] = True
+        fold_graph.test_mask[test_indices] = True
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         # Train
-        trainer = GNNTrainer(graph_data, fold_idx, device)
+        trainer = GNNTrainer(fold_graph, fold_idx, device)
         res = trainer.fit()
         fold_time = (time.time() - t0) / 60
 
-        print(f"\n🎯 Fold {fold_idx + 1} Best Val Acc: {res['best_val_acc']*100:.2f}% | Test Acc: {res['test_acc']*100:.2f}% | Cog MAE: {res['test_mae']:.4f}")
+        print(f"\n🎯 Fold {fold_idx + 1} Best Val Acc: {res['best_val_acc']*100:.2f}% (Val Loss: {res['best_val_loss']:.4f}) | Test Acc: {res['test_acc']*100:.2f}% | Cog MAE: {res['test_mae']:.4f}")
         print(f"⏱️ Fold Time: {fold_time:.1f} minutes")
 
         cv_results.append(res)
         del trainer
+        del fold_graph
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     mean_test_acc = np.mean([r['test_acc'] for r in cv_results])
     mean_test_mae = np.mean([r['test_mae'] for r in cv_results])
-    print(f"\n🏆 Overall 5-Fold CV NeuroGAT Test Accuracy: {mean_test_acc*100:.2f}% | Cognitive MAE: {mean_test_mae:.4f}")
+    print(f"\n🏆 Mean Held-Out Test Accuracy Across 5 Folds: {mean_test_acc*100:.2f}% | Cognitive MAE: {mean_test_mae:.4f}")
 
     # Save complete results checkpoint
     os.makedirs(output_dir, exist_ok=True)
     torch.save(cv_results, os.path.join(output_dir, 'cv_gnn_results.pt'))
 
-    # Save overall best model state for XAI and Inference
+    # Save overall best model state based STRICTLY on validation performance (Zero Test Leakage)
     os.makedirs(checkpoint_dir, exist_ok=True)
-    best_fold_idx = int(np.argmax([r['test_acc'] for r in cv_results]))
+    best_fold_idx = int(np.argmin([r['best_val_loss'] for r in cv_results]))
     best_fold_path = os.path.join(checkpoint_dir, f'fold{best_fold_idx}_best.pt')
     target_best_path = os.path.join(checkpoint_dir, 'neurogat_best_model.pt')
     if os.path.exists(best_fold_path):
         import shutil
         shutil.copyfile(best_fold_path, target_best_path)
-        print(f"💾 Exported top performing model (Fold {best_fold_idx + 1}) to: {target_best_path}")
+        print(f"💾 Exported top performing model (Fold {best_fold_idx + 1}, Min Val Loss: {cv_results[best_fold_idx]['best_val_loss']:.4f}) to: {target_best_path}")
 
     return cv_results
 

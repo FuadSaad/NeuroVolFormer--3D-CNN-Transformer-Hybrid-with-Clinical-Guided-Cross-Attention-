@@ -201,29 +201,30 @@ class Config:
     KNN_K_LIST = [3, 5, 10]       # Multi-scale neighborhood (Micro, Meso, Macro)
     GAT_HIDDEN_DIM = 128          # Hidden dimensions in GATv2 layers
     GAT_HEADS = 4                 # Multi-head attention heads in GATv2
-    GAT_DROPOUT = 0.3             # Dropout for regularized graph representation
-    L2_REGULARIZATION = 5e-4      # Weight decay for GAT
+    GAT_DROPOUT = 0.4             # Dropout for regularized graph representation (increased from 0.3)
+    L2_REGULARIZATION = 1e-3      # Weight decay for GAT
     AUX_COG_WEIGHT = 0.1          # Multi-task auxiliary cognitive loss weight
 
-    # ── Clinical Features ──
-    CLINICAL_DIM = 10             # Number of clinical features
-    CLINICAL_FEATURES = [
-        'CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate',
-        'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
-    ]
+    # ── Clinical Demographics & Biomarkers (Strict De-biasing & Target Non-Leakage) ──
+    CLINICAL_DEMOGRAPHICS = ['AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse']
+    DIAGNOSTIC_PROXIES = ['CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate']
+    INCLUDE_DIAGNOSTIC_PROXIES = False  # False: Q1 publication standard (zero circular target leakage)
+    CLINICAL_FEATURES = CLINICAL_DEMOGRAPHICS if not INCLUDE_DIAGNOSTIC_PROXIES else (DIAGNOSTIC_PROXIES + CLINICAL_DEMOGRAPHICS)
+    CLINICAL_DIM = len(CLINICAL_FEATURES)
 
     # ── Classifier Head ──
-    CLASSIFIER_DROPOUT = 0.4
+    CLASSIFIER_DROPOUT = 0.5      # Increased from 0.4 to prevent overfitting
 
     # ── Training Hyperparameters (GNN is Transductive Full-Batch) ──
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
     GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
     EPOCHS = 300                  # Maximum training epochs
-    PATIENCE = 50                 # Early stopping patience
+    PATIENCE = 20                 # Early stopping patience (reduced from 50 to arrest epoch 50+ overfit)
+    MONITOR_METRIC = 'val_loss'   # Monitor validation loss strictly
 
     # ── Optimizer ──
     LEARNING_RATE = 5e-4          # Optimal learning rate for AdamW
-    WEIGHT_DECAY = 0.01
+    WEIGHT_DECAY = 0.02           # Stronger weight regularization (increased from 0.01)
     BETAS = (0.9, 0.999)
 
     # ── Scheduler ──
@@ -239,7 +240,7 @@ class Config:
     USE_CUSTOM_CLASS_WEIGHTS = False             # False: rely on mathematically pure Effective Number of Samples (Cui et al., CVPR 2019)
     USE_COST_SENSITIVE_LOSS = False              # False: avoid artificial bias that induces high LMCI false alarms
     COST_EMCI_LMCI_PENALTY = 1.0                 # Neutral penalty
-    FAIR_BASELINE_MODE = True                    # Exclude diagnostic target proxies (CDRSB/MMSE/LogMem) from ML baselines
+    FAIR_BASELINE_MODE = True                    # Symmetrical evaluation: Baselines & NeuroGAT receive identical features
 
     # ── Logit Adjustment (NeurIPS 2020) & Effective Number of Samples (CVPR 2019) ──
     USE_LOGIT_ADJUSTMENT = False                 # Disabled when Effective Samples is active to prevent over-adjustment
@@ -249,7 +250,7 @@ class Config:
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
     USE_DROPEDGE = True                          # Graph data augmentation & over-smoothing prevention
-    DROPEDGE_RATE = 0.15                         # Probability of randomly dropping edges during train
+    DROPEDGE_RATE = 0.20                         # Probability of randomly dropping edges during train (increased from 0.15)
     BOOTSTRAP_ITERATIONS = 1000                  # 1,000 resamplings for 95% Confidence Intervals
     GENERATE_LATEX_TABLES = True                 # Export camera-ready booktabs .tex tables
 
@@ -497,8 +498,8 @@ def print_config(config: Config) -> None:
         'CNN Encoder': ['CNN_CHANNELS', 'CNN_DROPOUT'],
         'Transformer': ['PATCH_SIZE', 'D_MODEL', 'N_HEADS', 'N_LAYERS', 'FFN_DIM', 'TRANSFORMER_DROPOUT'],
         'Population Graph': ['KNN_K_LIST', 'GAT_HIDDEN_DIM', 'GAT_HEADS', 'GAT_DROPOUT', 'USE_DROPEDGE'],
-        'Clinical': ['CLINICAL_DIM'],
-        'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'LEARNING_RATE', 'WEIGHT_DECAY'],
+        'Clinical': ['CLINICAL_DIM', 'INCLUDE_DIAGNOSTIC_PROXIES'],
+        'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'MONITOR_METRIC', 'LEARNING_RATE', 'WEIGHT_DECAY'],
         'Loss & Balancing': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_LOGIT_ADJUSTMENT', 'USE_EFFECTIVE_NUM_SAMPLES', 'COST_EMCI_LMCI_PENALTY'],
         'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED'],
         'Pipeline & Clean-Slate': ['CLEAN_OUTPUTS_ON_START', 'PRESERVE_EXTRACTED_FEATURES'],

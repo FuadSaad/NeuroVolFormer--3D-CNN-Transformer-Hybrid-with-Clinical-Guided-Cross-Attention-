@@ -153,8 +153,9 @@ class ADNIDataset(Dataset):
             # Load from compressed .npz file
             data = np.load(self.file_paths[idx])
             volume = data['volume'].astype(np.float32)
-        except Exception:
-            # Return zero volume if loading fails
+        except Exception as e:
+            # Explicit warning log for transparency and data integrity tracking
+            print(f"⚠️ Warning: Could not load volume at index {idx} ({self.file_paths[idx]}): {e}. Supplying zero-volume fallback.")
             volume = np.zeros(Config.INPUT_SIZE, dtype=np.float32)
 
         # Apply augmentation
@@ -274,18 +275,23 @@ def get_patient_level_split(
 
 def prepare_clinical_features(
     file_df: pd.DataFrame,
-    train_indices: List[int]
-) -> Tuple[np.ndarray, StandardScaler]:
+    train_indices: Optional[List[int]] = None
+) -> Tuple[np.ndarray, Optional[StandardScaler]]:
     """
-    Prepare and standardize clinical features or load from checkpoint.
-    Fit scaler on training data only to prevent data leakage.
+    Prepare and standardize clinical demographic features without data leakage.
+    Imputation medians and scaling parameters are strictly computed from train_indices.
     """
     checkpoint_path = os.path.join(Config.OUTPUT_DIR, 'results', 'clinical_data_v2.pt')
     if os.path.exists(checkpoint_path):
-        print(f"📂 Found existing clinical features checkpoint. Loading: {checkpoint_path}")
-        data = torch.load(checkpoint_path, weights_only=False)
-        print(f"✅ Loaded clinical features: {data['features'].shape}")
-        return data['features'], data['scaler']
+        try:
+            data = torch.load(checkpoint_path, weights_only=False)
+            if data['features'].shape[1] == Config.CLINICAL_DIM:
+                print(f"📂 Found compatible clinical features checkpoint. Loading: {checkpoint_path}")
+                return data['features'], data['scaler']
+            else:
+                print(f"ℹ️ Cached clinical features dimension ({data['features'].shape[1]}) differs from Config.CLINICAL_DIM ({Config.CLINICAL_DIM}). Recomputing fresh...")
+        except Exception:
+            pass
 
     clinical_cols = Config.CLINICAL_FEATURES
     available_cols = [c for c in clinical_cols if c in file_df.columns]
@@ -295,10 +301,16 @@ def prepare_clinical_features(
         features = np.zeros((len(file_df), Config.CLINICAL_DIM), dtype=np.float32)
         return features, None
 
-    # Extract features, fill missing with median
+    # Extract features, fill missing values strictly using training set medians to prevent leakage
     features_df = file_df[available_cols].copy()
-    for col in available_cols:
-        features_df[col] = features_df[col].fillna(features_df[col].median())
+    if train_indices is not None and len(train_indices) > 0:
+        train_df = features_df.iloc[train_indices]
+        for col in available_cols:
+            med_val = train_df[col].median()
+            features_df[col] = features_df[col].fillna(med_val)
+    else:
+        for col in available_cols:
+            features_df[col] = features_df[col].fillna(features_df[col].median())
 
     features = features_df.values.astype(np.float32)
 
@@ -307,13 +319,15 @@ def prepare_clinical_features(
         padding = np.zeros((features.shape[0], Config.CLINICAL_DIM - features.shape[1]), dtype=np.float32)
         features = np.hstack([features, padding])
 
-    # Fit scaler on training data only
-    scaler = StandardScaler()
-    scaler.fit(features[train_indices])
-    features = scaler.transform(features)
+    # Fit scaler strictly on training split
+    scaler = None
+    if train_indices is not None and len(train_indices) > 0:
+        scaler = StandardScaler()
+        scaler.fit(features[train_indices])
+        features = scaler.transform(features)
 
-    print(f"✅ Clinical features prepared: {features.shape}")
-    print(f"   Available features: {available_cols}")
+    print(f"✅ Clinical features prepared: {features.shape} (Leak-free)")
+    print(f"   Active demographic/clinical features: {available_cols}")
 
     # Save checkpoint
     os.makedirs(os.path.join(Config.OUTPUT_DIR, 'results'), exist_ok=True)
@@ -448,9 +462,9 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     print("\n" + "-" * 50)
     print("  Step 2: Clinical Feature Standardization")
     print("-" * 50)
-    # Use first fold's train indices for fitting scaler
-    first_fold_train = fold_splits[0][0]
-    clinical_features, scaler = prepare_clinical_features(file_df, first_fold_train)
+    # Fit strictly on development cohort (train + val) without touching held-out test cohort
+    train_val_indices = [i for i in range(len(file_df)) if i not in set(test_indices)]
+    clinical_features, scaler = prepare_clinical_features(file_df, train_val_indices)
 
     # Step 3: Visualize splits
     print("\n" + "-" * 50)

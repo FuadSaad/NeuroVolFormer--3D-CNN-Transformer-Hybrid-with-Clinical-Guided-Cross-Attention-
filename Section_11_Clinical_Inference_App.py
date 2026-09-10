@@ -67,7 +67,6 @@ _defaults = {
     'L2_REGULARIZATION': 5e-4,
     'AUX_COG_WEIGHT': 0.1,
     'CLINICAL_FEATURES': [
-        'CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate',
         'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
     ],
     'CLASS_COLORS': {'AD': '#e74c3c', 'CN': '#2ecc71', 'EMCI': '#3498db', 'LMCI': '#e67e22'}
@@ -142,25 +141,42 @@ class NeuroGATInferenceEngine:
         loaded_paths = []
         ckpt_dir = getattr(Config, 'CHECKPOINT_DIR', '/kaggle/working/checkpoints')
 
-        candidates = []
-        if checkpoint_path:
-            candidates.append(checkpoint_path)
+        loaded_realpaths = set()
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            rp = os.path.realpath(checkpoint_path)
+            loaded_paths.append(checkpoint_path)
+            loaded_realpaths.add(rp)
 
-        # Check best exported model first
-        candidates.append(os.path.join(ckpt_dir, 'neurogat_best_model.pt'))
-        candidates.append(os.path.join('/kaggle/working/checkpoints', 'neurogat_best_model.pt'))
-
-        # Check folds
-        for f in range(5):
-            candidates.append(os.path.join(ckpt_dir, f'fold{f}_best.pt'))
-            candidates.append(os.path.join('/kaggle/working/checkpoints', f'fold{f}_best.pt'))
-            candidates.append(f'checkpoints/fold{f}_best.pt')
-
-        for p in candidates:
-            if p and os.path.exists(p) and p not in loaded_paths:
-                loaded_paths.append(p)
-                if not self.use_ensemble:
-                    break
+        if self.use_ensemble:
+            # Load exactly the 5 distinct fold models without duplicates
+            for f in range(5):
+                fold_candidates = [
+                    os.path.join(ckpt_dir, f'fold{f}_best.pt'),
+                    os.path.join('/kaggle/working/checkpoints', f'fold{f}_best.pt'),
+                    f'checkpoints/fold{f}_best.pt'
+                ]
+                for p in fold_candidates:
+                    if os.path.exists(p):
+                        rp = os.path.realpath(p)
+                        if rp not in loaded_realpaths:
+                            loaded_paths.append(p)
+                            loaded_realpaths.add(rp)
+                            break
+        else:
+            # Single top performing model
+            single_candidates = [
+                os.path.join(ckpt_dir, 'neurogat_best_model.pt'),
+                os.path.join('/kaggle/working/checkpoints', 'neurogat_best_model.pt'),
+                'checkpoints/neurogat_best_model.pt',
+                os.path.join(ckpt_dir, 'fold0_best.pt'),
+            ]
+            for p in single_candidates:
+                if os.path.exists(p):
+                    rp = os.path.realpath(p)
+                    if rp not in loaded_realpaths:
+                        loaded_paths.append(p)
+                        loaded_realpaths.add(rp)
+                        break
 
         num_classes = getattr(Config, 'NUM_CLASSES', 4)
         for path in loaded_paths:

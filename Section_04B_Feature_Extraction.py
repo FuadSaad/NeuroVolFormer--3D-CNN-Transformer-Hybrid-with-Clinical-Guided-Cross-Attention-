@@ -212,6 +212,7 @@ def extract_radiomics(volume_np: np.ndarray) -> np.ndarray:
     extractor.enableFeatureClassByName('glcm')
     extractor.enableFeatureClassByName('glrlm')
 
+    target_dim = getattr(Config, 'RADIOMICS_FEATURE_DIM', 68)
     try:
         result = extractor.execute(image, mask)
         # Extract numerical features
@@ -219,10 +220,16 @@ def extract_radiomics(volume_np: np.ndarray) -> np.ndarray:
         for key, value in result.items():
             if key.startswith('original_'):
                 features.append(float(value))
-        return np.array(features, dtype=np.float32)
+        feats = np.array(features, dtype=np.float32)
+        # Deterministically enforce target_dim dimension
+        if len(feats) < target_dim:
+            feats = np.pad(feats, (0, target_dim - len(feats)), mode='constant')
+        else:
+            feats = feats[:target_dim]
+        return np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
     except Exception as e:
         # Fallback if extractor fails
-        return extract_native_radiomics(volume_np, getattr(Config, 'RADIOMICS_FEATURE_DIM', 68))
+        return extract_native_radiomics(volume_np, target_dim)
 
 def run_feature_extraction(file_df: pd.DataFrame, clinical_features: pd.DataFrame):
     """

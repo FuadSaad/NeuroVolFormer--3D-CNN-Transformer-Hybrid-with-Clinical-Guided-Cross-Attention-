@@ -436,7 +436,7 @@ def generate_full_evaluation(features_path: str, labels_path: str):
         all_risks, _ = compute_mci_conversion_risk(all_probs)
 
     # 1. Classification Report
-    print("\n📝 Overall 5-Fold Cross-Validation Classification Report:")
+    print("\n📝 Independent Held-Out Test Cohort Evaluation (Pooled Across 5 Development Folds):")
     report = classification_report(all_labels, all_preds, target_names=Config.CLASS_NAMES)
     print(report)
 

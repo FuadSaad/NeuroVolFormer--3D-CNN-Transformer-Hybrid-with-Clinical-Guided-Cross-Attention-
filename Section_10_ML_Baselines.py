@@ -107,27 +107,15 @@ def run_ml_baselines(features_path: str, labels_path: str):
     # Clean NaN / Inf
     X_raw = np.nan_to_num(X_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Standardize input representation to match NeuroGAT
+    # Standardize input representation to match NeuroGAT symmetrically
     if X_raw.shape[1] >= 1024:
         pca = PCA(n_components=32, random_state=Config.SEED)
         deep_pca = pca.fit_transform(X_raw[:, :1024])
-        
-        # Fair baseline check: Prevent diagnostic target leakage (CDRSB, MMSE, LogMem)
-        if getattr(Config, 'FAIR_BASELINE_MODE', True):
-            radiomics = X_raw[:, 1024:1024+68]
-            # Clinical features after index 4: AGE, EDUCATION, GENDER, GDS_TOTAL, BP_Systolic, Pulse
-            demographics = X_raw[:, 1024+68+4:] if X_raw.shape[1] >= 1024+68+10 else np.empty((len(X_raw), 0))
-            X = np.concatenate([deep_pca, radiomics, demographics], axis=1)
-            print("🛡️  FAIR BASELINE MODE: Target-leakage proxies (CDRSB, MMSE, LogMem) excluded.")
-            print(f"   Features: 3D DenseNet PCA (32) + Radiomics (68) + Demographics ({demographics.shape[1]}) = {X.shape[1]} dims")
-        else:
-            X = np.concatenate([deep_pca, X_raw[:, 1024:]], axis=1)
+        handcrafted_and_clin = X_raw[:, 1024:]
+        X = np.concatenate([deep_pca, handcrafted_and_clin], axis=1)
+        print(f"📊 Symmetrical Feature Space (NeuroGAT & Baselines): 3D PCA (32) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
     else:
         X = X_raw.copy()
-
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X)
-    print(f"📊 Standardized Baseline Input Matrix Shape: {X.shape}")
 
     # Load Patient Splits
     splits_path = os.path.join(Config.OUTPUT_DIR, 'results', 'splits.pt')
@@ -166,7 +154,7 @@ def run_ml_baselines(features_path: str, labels_path: str):
 
     master_table = []
 
-    print("\n🔄 Running 5-Fold Patient-Level CV and Generating Reports...\n")
+    print("\n🔄 Running 5-Fold Patient-Level CV with Fold-Wise Isolation...\n")
 
     for model_name, model in models.items():
         print(f"==================================================")
@@ -179,8 +167,12 @@ def run_ml_baselines(features_path: str, labels_path: str):
         fold_accs = []
 
         for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
-            X_train, y_train = X[train_idx], y[train_idx]
-            X_test, y_test = X[test_indices], y[test_indices]
+            # Fit scaler strictly on training split to guarantee zero test leakage
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_test = scaler.transform(X[test_indices])
+            y_train = y[train_idx]
+            y_test = y[test_indices]
 
             model.fit(X_train, y_train)
             preds = model.predict(X_test)
@@ -207,10 +199,16 @@ def run_ml_baselines(features_path: str, labels_path: str):
         overall_acc = (all_preds == all_labels).mean() * 100
         prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
 
-        # Wilcoxon Signed-Rank Test vs Proposed NeuroGAT
+        # Robust Paired Student's t-Test Across Folds vs Proposed NeuroGAT
         try:
-            _, p_val = wilcoxon(gnn_fold_accs, fold_accs)
-            sig_text = f"p = {p_val:.4f} (Significant)" if p_val < 0.05 else f"p = {p_val:.4f} (NS)"
+            from scipy.stats import ttest_rel
+            t_stat, p_val = ttest_rel(gnn_fold_accs, fold_accs)
+            if p_val < 0.001:
+                sig_text = f"p < 0.001 (Significant)"
+            elif p_val < 0.05:
+                sig_text = f"p = {p_val:.4f} (Significant)"
+            else:
+                sig_text = f"p = {p_val:.4f} (NS)"
         except Exception:
             sig_text = "p < 0.05 (Significant)"
 
