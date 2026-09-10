@@ -2,15 +2,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║          SECTION 9: COMPREHENSIVE EXPLAINABLE AI (XAI) - Q1 / A* EDITION     ║
-║  Generates:                                                                  ║
-║    1. NeuroGAT Population Graph Attention Interpretability (Alpha_ij)        ║
-║       - Inter-Class Attention Flow Heatmap Matrix                            ║
-║       - Patient Case Study: Local Ego-Network Subgraph with Clinical Sidebar ║
+║  Interpretability Suite:                                                     ║
+║    1. NeuroGAT Population Graph Attention (Alpha_ij)                         ║
+║       - Inter-Class Attention Flow Matrix (Relational Interpretability)      ║
+║       - Patient Ego-Network Subgraph (Non-Causal Topological Case Study)     ║
 ║    2. NeuroGAT Model-Specific Multimodal Gradient Saliency Attribution       ║
-║    3. Grouped Gini Feature Importance (Modality Breakdown)                   ║
-║    4. SHAP (SHapley Additive exPlanations) with Named Clinical & Texture Vars║
-║    5. LIME (Local Interpretable Model-agnostic Explanations)                 ║
-║    6. 3D MRI Grad-CAM Slice Visualizations Across Classes                    ║
+║    3. Grouped Feature Importance across Multimodal Modalities                ║
+║    4. SHAP (SHapley Additive exPlanations) on Tabular Feature Surrogate     ║
+║    5. LIME Local Interpretable Model-agnostic Explanations                   ║
+║    6. 3D MRI Grad-CAM Slice Visualizations Across Diagnoses                  ║
+║                                                                              ║
+║  Methodological Safeguards (Q1 Defense Verified):                            ║
+║    • Relational Interpretability: GAT attention weights reflect learned     ║
+║      topological message aggregation, not causal biological mechanisms.      ║
+║    • Surrogate Tree Interpretability: Tabular SHAP/LIME explain tree         ║
+║      surrogate decisions on the 106-D multimodal representation.             ║
+║    • Zero Target Leakage: Diagnostic proxies (MMSE, CDRSB, LogMem) are       ║
+║      strictly excluded from all feature attribution manifolds.               ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -58,12 +66,14 @@ except (ImportError, ModuleNotFoundError):
 def get_interpretable_feature_names(total_dim: int) -> List[str]:
     """
     Generates clinically accurate, publication-ready feature names
-    for Deep PCA, Handcrafted Radiomics, and Clinical Biomarkers.
+    for Deep PCA, Handcrafted Radiomics, and Clinical Demographics.
+    Enforces strict alignment with Config.CLINICAL_FEATURES (Zero Target Leakage).
     """
-    clinical_names = [
-        'CDRSB', 'MMSE', 'LogMem_Delayed', 'LogMem_Immediate',
+    clinical_names = list(getattr(Config, 'CLINICAL_FEATURES', [
         'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
-    ]
+    ]))
+    n_clin = len(clinical_names)
+
     radiomics_base = [
         'GLCM_Contrast', 'GLCM_Correlation', 'GLCM_Energy', 'GLCM_Homogeneity',
         'GLCM_Entropy', 'GLCM_Dissimilarity', 'GLRLM_RunLengthNonUniformity',
@@ -77,17 +87,19 @@ def get_interpretable_feature_names(total_dim: int) -> List[str]:
     while len(radiomics_names) < 68:
         radiomics_names.append(f"Radiomics_Texture_{len(radiomics_names) + 1}")
 
-    if total_dim == 110:  # Standard PCA fused input (32 PCA + 68 Radiomics + 10 Clinical)
+    if total_dim == 32 + 68 + n_clin:  # Standard PCA fused input (32 PCA + 68 Radiomics + 6 Demographics = 106-D)
         deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(32)]
-        return deep_names + radiomics_names[:68] + clinical_names[:10]
+        return deep_names + radiomics_names[:68] + clinical_names
     elif total_dim == 100:  # 32 PCA + 68 Radiomics
         deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(32)]
         return deep_names + radiomics_names[:68]
     elif total_dim >= 1024:
         deep_names = [f"Deep_DenseNet_{i+1:04d}" for i in range(1024)]
         rem = total_dim - 1024
-        if rem == 78:  # 68 radiomics + 10 clinical
-            return deep_names + radiomics_names[:68] + clinical_names[:10]
+        if rem == 68 + n_clin:
+            return deep_names + radiomics_names[:68] + clinical_names
+        elif rem == 68:
+            return deep_names + radiomics_names[:68]
         else:
             return deep_names + [f"Feature_{i+1}" for i in range(rem)]
     else:
@@ -238,29 +250,29 @@ def plot_patient_ego_network(
             ha='center', va='center', fontsize=9, fontweight='bold'
         )
 
-        # Clinical details
+        # Clinical details (Zero diagnostic proxy leakage: no MMSE/CDRSB)
         subj_id = f"Subj_{nbr}"
         age_val = "N/A"
-        mmse_val = "N/A"
-        cdrsb_val = "N/A"
+        edu_val = "N/A"
+        gds_val = "N/A"
 
         if file_df is not None and nbr < len(file_df):
             row = file_df.iloc[nbr]
             subj_id = str(row.get('Subject', f"Subj_{nbr}"))
             age_val = f"{row.get('AGE', 'N/A')}"
-            mmse_val = f"{row.get('MMSE', 'N/A')}"
-            cdrsb_val = f"{row.get('CDRSB', 'N/A')}"
+            edu_val = f"{row.get('EDUCATION', 'N/A')}"
+            gds_val = f"{row.get('GDS_TOTAL', 'N/A')}"
 
-        table_rows.append([f"Node {nbr}", subj_id, nbr_label, f"{w_pct:.1f}%", age_val, mmse_val, cdrsb_val])
+        table_rows.append([f"Node {nbr}", subj_id, nbr_label, f"{w_pct:.1f}%", age_val, edu_val, gds_val])
 
     ax_graph.set_title(
-        f"NeuroGAT Attention Ego-Network (Query Node #{target_idx})",
+        f"NeuroGAT Relational Ego-Network (Query Node #{target_idx})",
         fontsize=13, fontweight='bold', pad=10
     )
 
     # Clinical Neighbors Attribute Table
     ax_table.axis('off')
-    headers = ['Node', 'Subject ID', 'Diagnosis', 'Attention', 'Age', 'MMSE', 'CDR-SB']
+    headers = ['Node', 'Subject ID', 'Diagnosis', 'Attention', 'Age', 'Education', 'GDS']
     tab = ax_table.table(
         cellText=table_rows,
         colLabels=headers,
@@ -361,7 +373,7 @@ def plot_gini_importance_grouped(rf_model, feature_names: List[str]):
     modality_scores = {
         'Deep CNN (DenseNet)': 0.0,
         'Handcrafted (Radiomics)': 0.0,
-        'Clinical (Age, Sex, MMSE, etc.)': 0.0
+        'Clinical & Demographics (Age, Sex, Education, GDS, BP)': 0.0
     }
 
     for name, score in zip(feature_names, importances):
@@ -370,7 +382,7 @@ def plot_gini_importance_grouped(rf_model, feature_names: List[str]):
         elif name.startswith("Radiomics") or name.startswith("Handcrafted"):
             modality_scores['Handcrafted (Radiomics)'] += score
         else:
-            modality_scores['Clinical (Age, Sex, MMSE, etc.)'] += score
+            modality_scores['Clinical & Demographics (Age, Sex, Education, GDS, BP)'] += score
 
     total = sum(modality_scores.values())
     if total > 0:
@@ -397,11 +409,11 @@ def plot_gini_importance_grouped(rf_model, feature_names: List[str]):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9.4 SHAP (SHapley Additive exPlanations)
+# 9.4 SHAP (SHapley Additive exPlanations) - Tabular Surrogate Model
 # ═══════════════════════════════════════════════════════════════════
 
 def plot_shap_summary(rf_model, X: np.ndarray, feature_names: List[str]):
-    print("🧠 Generating SHAP Summary Plot with Named Biomarkers...")
+    print("🧠 Generating SHAP Summary Plot on Multimodal Tabular Surrogate Model...")
     try:
         explainer = shap.TreeExplainer(rf_model)
         sample_idx = np.random.choice(X.shape[0], min(300, X.shape[0]), replace=False)
@@ -417,7 +429,7 @@ def plot_shap_summary(rf_model, X: np.ndarray, feature_names: List[str]):
 
         plt.figure(figsize=(10, 8))
         shap.summary_plot(shap_values_global, X_sample, feature_names=feature_names, max_display=15, plot_type="bar", show=False)
-        plt.title('SHAP Global Feature Importance (Top Biomarkers)', fontsize=14, fontweight='bold')
+        plt.title('Surrogate Model SHAP Feature Importance (Top Biomarkers)', fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.savefig(os.path.join(Config.FIGURES_DIR, 'xai_shap_summary.png'), dpi=300, bbox_inches='tight')
         plt.show()
@@ -428,11 +440,11 @@ def plot_shap_summary(rf_model, X: np.ndarray, feature_names: List[str]):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9.5 LIME (Local Interpretable Model-agnostic Explanations)
+# 9.5 LIME (Local Interpretable Model-agnostic Explanations) - Tabular Surrogate Model
 # ═══════════════════════════════════════════════════════════════════
 
 def plot_lime_explanation(rf_model, X: np.ndarray, feature_names: List[str]):
-    print("🍋 Generating LIME Explanation for a single patient...")
+    print("🍋 Generating LIME Explanation on Multimodal Tabular Surrogate Model for Patient Case #0...")
     try:
         explainer = lime.lime_tabular.LimeTabularExplainer(
             training_data=X, feature_names=feature_names,
@@ -441,7 +453,7 @@ def plot_lime_explanation(rf_model, X: np.ndarray, feature_names: List[str]):
         exp = explainer.explain_instance(data_row=X[0], predict_fn=rf_model.predict_proba, num_features=10)
 
         fig = exp.as_pyplot_figure()
-        plt.title('LIME Local Decision Explanation (Patient Case #0)', fontsize=13, fontweight='bold')
+        plt.title('Surrogate Model LIME Local Decision Explanation (Patient Case #0)', fontsize=13, fontweight='bold')
         plt.tight_layout()
         plt.savefig(os.path.join(Config.FIGURES_DIR, 'xai_lime_patient_0.png'), dpi=300, bbox_inches='tight')
         plt.show()
@@ -564,7 +576,7 @@ def run_all_xai(features_path: str, labels_path: str):
 
     # 3. Load Trained NeuroGAT Model & Extract Graph Attention
     k_list = getattr(Config, 'KNN_K_LIST', [3, Config.KNN_K, 10])
-    graph_data = build_multiscale_population_graph(X_raw, y, k_list=k_list).to(device)
+    graph_data = build_multiscale_population_graph(X_raw, k_list=k_list).to(device)
 
     best_model_path = os.path.join(Config.CHECKPOINT_DIR, 'neurogat_best_model.pt')
     if not os.path.exists(best_model_path):

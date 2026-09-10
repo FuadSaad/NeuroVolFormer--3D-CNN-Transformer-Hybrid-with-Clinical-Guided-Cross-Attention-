@@ -4,20 +4,21 @@
 ║          SECTION 10: TRADITIONAL MACHINE LEARNING BASELINES (Q1 Edition)     ║
 ║  Compares NeuroGAT against SVM, Random Forest, MLP, and Regularized XGBoost  ║
 ║  Includes:                                                                   ║
-║    1. Patient-Level 5-Fold Cross-Validation on Standardized 100-D Features   ║
+║    1. Patient-Level 5-Fold Cross-Validation on Symmetrical Multimodal Space  ║
 ║    2. Confusion Matrices & ROC Curves for every baseline                     ║
-║    3. Wilcoxon Signed-Rank Statistical Significance Tests (p < 0.05)         ║
+║    3. Edwards' McNemar Significance Tests with Holm-Bonferroni Adjustment    ║
 ║    4. Master Benchmark Comparison Table                                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
+from typing import List, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
-from scipy.stats import wilcoxon
+from scipy.stats import ttest_rel
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier

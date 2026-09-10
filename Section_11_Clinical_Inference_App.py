@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║      SECTION 11: CLINICAL INFERENCE & WEB APP (NeuroGAT A* Edition)          ║
+║      SECTION 11: CLINICAL INFERENCE & RESEARCH PROTOTYPE (NeuroGAT Q1)       ║
 ║  Features:                                                                   ║
-║    1. Multi-Task NeuroGAT Inference Engine (4-Class Diagnosis + MMSE Regr)   ║
-║    2. Transductive Population Graph Integration (Patient-to-Cohort KNN)      ║
-║    3. Calibrated 24-Month MCI Conversion Prognosis Risk Stratification       ║
+║    1. Multi-Task NeuroGAT Inference Engine (4-Class Diagnosis + Auxiliary    ║
+║       Continuous Cognitive Severity Regression)                              ║
+║    2. Transductive Multi-Scale Population Graph Integration (K=[3, 5, 10])   ║
+║    3. Empirical Disease Progression & Transition Vulnerability Stratification║
 ║    4. Multimodal Biomarker Fingerprint & Radar Visualization                 ║
-║    5. Interactive Gradio Clinical Web Application & Batch CSV Processor      ║
+║    5. Interactive Gradio Research Web Application & Batch CSV Processor      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -62,9 +63,10 @@ _defaults = {
     'KNN_K_LIST': [3, 5, 10],
     'GAT_HIDDEN_DIM': 128,
     'GAT_HEADS': 4,
-    'GAT_DROPOUT': 0.3,
-    'CLASSIFIER_DROPOUT': 0.4,
-    'L2_REGULARIZATION': 5e-4,
+    'GAT_DROPOUT': 0.35,
+    'CLASSIFIER_DROPOUT': 0.45,
+    'WEIGHT_DECAY': 0.005,
+    'L2_REGULARIZATION': 1e-3,
     'AUX_COG_WEIGHT': 0.1,
     'CLINICAL_FEATURES': [
         'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
@@ -77,19 +79,19 @@ for _k, _v in _defaults.items():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9.1 NeuroGAT Clinical Inference Engine
+# 11.1 NeuroGAT Clinical Inference Engine (Research Prototype)
 # ═══════════════════════════════════════════════════════════════════
 
 class NeuroGATInferenceEngine:
     """
-    Production-grade Clinical Decision Support Inference Engine for NeuroGAT.
+    Research Decision-Support Prototype for NeuroGAT.
 
     Capabilities:
       - 5-Fold Ensemble or Single-Checkpoint loading
-      - Dynamic Query-Node Graph Injection (Transductive Phenotypic Alignment)
+      - Dynamic Query-Node Multi-Scale Graph Injection (Transductive Phenotypic Alignment)
       - Joint Diagnostic Classification (AD, CN, EMCI, LMCI)
-      - Auxiliary Continuous Cognitive Severity / MMSE Trajectory
-      - 24-Month MCI-to-AD Conversion Hazard Prognosis
+      - Auxiliary Continuous Cognitive Severity Regression
+      - Empirical Disease Progression & Transition Vulnerability Stratification
       - Patient Biomarker Radar & Probability Visualizations
     """
     def __init__(
@@ -107,8 +109,10 @@ class NeuroGATInferenceEngine:
         self.ref_labels = None
         self._load_reference_cohort()
 
-        # Determine feature input dimension
-        in_dim = 100  # Standard PCA (32) + Radiomics (68) or Full 1092
+        # Determine feature input dimension: 32 PCA + 68 Radiomics + 6 Demographics = 106-D
+        in_dim = 32 + 68 + len(getattr(Config, 'CLINICAL_FEATURES', [
+            'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
+        ]))  # Default 106-D
         if self.ref_features is not None:
             in_dim = self.ref_features.shape[1]
 
@@ -254,31 +258,22 @@ class NeuroGATInferenceEngine:
 
         # Build transductive graph context: inject query node into reference population manifold
         if self.ref_features is not None:
-            scaler = StandardScaler()
-            ref_norm = scaler.fit_transform(self.ref_features)
-            patient_norm = scaler.transform(patient_vec)
-            full_norm = np.vstack([ref_norm, patient_norm])
-            query_idx = full_norm.shape[0] - 1
+            full_raw = np.vstack([self.ref_features, patient_vec])
+            ref_n = len(self.ref_features)
+            train_indices = list(range(ref_n))
+            k_list = getattr(Config, 'KNN_K_LIST', [3, 5, 10])
 
-            # Connect query patient to top-K nearest neighbors in reference population
-            k_neighbors = min(getattr(Config, 'KNN_K', 5), len(ref_norm))
-            knn = NearestNeighbors(n_neighbors=k_neighbors, metric='cosine')
-            knn.fit(ref_norm)
-            dists, indices = knn.kneighbors(patient_norm)
+            # Construct multi-scale population graph with query patient attached at index ref_n
+            graph_data = build_multiscale_population_graph(
+                full_raw,
+                k_list=k_list,
+                train_indices=train_indices
+            ).to(self.device)
 
-            edge_src = []
-            edge_dst = []
-            edge_w = []
-            for j in range(k_neighbors):
-                neighbor = indices[0, j]
-                sim = max(0.0, 1.0 - dists[0, j])
-                edge_src.extend([query_idx, neighbor])
-                edge_dst.extend([neighbor, query_idx])
-                edge_w.extend([sim, sim])
-
-            edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long).to(self.device)
-            edge_attr = torch.tensor(edge_w, dtype=torch.float32).unsqueeze(1).to(self.device)
-            x_tensor = torch.tensor(full_norm, dtype=torch.float32).to(self.device)
+            query_idx = ref_n
+            x_tensor = graph_data.x
+            edge_index = graph_data.edge_index
+            edge_attr = getattr(graph_data, 'edge_attr', None)
         else:
             # Self-loop graph for standalone query node
             query_idx = 0
@@ -320,7 +315,7 @@ class NeuroGATInferenceEngine:
         # Predicted Continuous Cognitive Trajectory (Rescaled to MMSE scale 0-30)
         predicted_mmse = round(float(30.0 * (1.0 - mean_cog)), 1)
 
-        # 24-Month Progression Risk Trajectory
+        # Empirical Disease Progression & Transition Vulnerability Stratification
         risk_scores, risk_strata = compute_mci_conversion_risk(mean_probs.reshape(1, -1), np.array([mean_cog]))
         risk_score = float(risk_scores[0])
         risk_stratum = risk_strata[0]
@@ -328,7 +323,7 @@ class NeuroGATInferenceEngine:
         # Probability dictionary
         prob_dict = {Config.CLASS_NAMES[i]: float(mean_probs[i]) for i in range(Config.NUM_CLASSES)}
 
-        # Clinical recommendations tailored to predicted stage & risk
+        # Clinical recommendations tailored to predicted stage & progression vulnerability
         recommendations = self._generate_recommendations(pred_class, risk_score, predicted_mmse)
 
         # Visualizations
@@ -339,6 +334,8 @@ class NeuroGATInferenceEngine:
             'confidence': confidence,
             'probabilities': prob_dict,
             'predicted_mmse': predicted_mmse,
+            'vulnerability_score': risk_score,
+            'vulnerability_stratum': risk_stratum,
             'conversion_risk_score': risk_score,
             'conversion_risk_stratum': risk_stratum,
             'recommendations': recommendations,
@@ -409,13 +406,13 @@ class NeuroGATInferenceEngine:
             ax1.text(width + 1.5, bar.get_y() + bar.get_height()/2.0, f'{width:.1f}%',
                      ha='left', va='center', fontsize=11, fontweight='bold')
 
-        # 2. 24-Month MCI Conversion Hazard & Cognitive Trajectory Gauge
+        # 2. Empirical Disease Progression Vulnerability & Cognitive Trajectory Gauge
         ax2 = axes[1]
-        categories = ['MCI Conversion Hazard', 'Cognitive Impairment Deficit']
-        hazard_val = risk_score
+        categories = ['Progression Vulnerability', 'Cognitive Impairment Deficit']
+        vulnerability_val = risk_score
         impairment_val = max(0.0, min(100.0, (30.0 - pred_mmse) / 30.0 * 100.0))
-        values = [hazard_val, impairment_val]
-        gauge_colors = ['#e74c3c' if hazard_val >= 60 else ('#e67e22' if hazard_val >= 25 else '#2ecc71'), '#9b59b6']
+        values = [vulnerability_val, impairment_val]
+        gauge_colors = ['#e74c3c' if vulnerability_val >= 60 else ('#e67e22' if vulnerability_val >= 25 else '#2ecc71'), '#9b59b6']
 
         y_pos2 = np.arange(len(categories))
         bars2 = ax2.barh(y_pos2, values, color=gauge_colors, height=0.45, edgecolor='black', linewidth=1.2)
@@ -425,7 +422,7 @@ class NeuroGATInferenceEngine:
         ax2.axvline(25.0, color='green', linestyle='--', alpha=0.7, label='Low Risk (<25%)')
         ax2.axvline(60.0, color='red', linestyle='--', alpha=0.7, label='High Risk (>60%)')
         ax2.set_xlabel('Score Index (%)', fontsize=12, fontweight='bold')
-        ax2.set_title(f'Prognosis: 24-Month Progression Risk ({hazard_val:.1f}%)', fontsize=14, fontweight='bold', pad=12)
+        ax2.set_title(f'Empirical Progression Vulnerability ({vulnerability_val:.1f}%)', fontsize=14, fontweight='bold', pad=12)
         ax2.legend(loc='lower right', prop={'size': 10, 'weight': 'bold'})
         ax2.grid(True, linestyle='--', alpha=0.5, axis='x')
 
@@ -465,6 +462,7 @@ class NeuroGATInferenceEngine:
                 'P(EMCI)': f"{res['probabilities']['EMCI']*100:.1f}%",
                 'P(LMCI)': f"{res['probabilities']['LMCI']*100:.1f}%",
                 'Predicted_MMSE': res['predicted_mmse'],
+                'Progression_Vulnerability': f"{res['conversion_risk_score']:.1f}%",
                 '24M_Conversion_Risk': f"{res['conversion_risk_score']:.1f}%",
                 'Risk_Stratum': res['conversion_risk_stratum']
             })
@@ -560,7 +558,7 @@ def create_gradio_app(engine: NeuroGATInferenceEngine) -> Optional['gr.Blocks']:
             <div style="display: flex; gap: 24px; font-size: 1.1em;">
                 <div>📊 <strong>Stage:</strong> {pred_cls}</div>
                 <div>🧠 <strong>Predicted MMSE:</strong> {pred_mmse} / 30</div>
-                <div>⚠️ <strong>24M Conversion Risk:</strong> {risk_pct:.1f}% ({risk_stratum})</div>
+                <div>⚠️ <strong>Progression Vulnerability:</strong> {risk_pct:.1f}% ({risk_stratum})</div>
             </div>
         </div>
         """
@@ -577,9 +575,9 @@ def create_gradio_app(engine: NeuroGATInferenceEngine) -> Optional['gr.Blocks']:
         gr.HTML("""
         <div class="main-header">
             <h1>🧠 NeuroGAT: Multi-Task Population Graph Attention Network</h1>
-            <p>Multimodal Phenotypic Graph Diagnostic Classification & 24-Month Disease Progression Prognosis</p>
+            <p>Multimodal Phenotypic Graph Diagnostic Classification & Disease Progression Vulnerability Assessment</p>
             <p style="font-size: 0.85em; opacity: 0.8;">
-                4-Class Diagnosis (AD / LMCI / EMCI / CN) · Continuous Cognitive Trajectory · Conversion Risk Hazard
+                4-Class Diagnosis (AD / LMCI / EMCI / CN) · Auxiliary Cognitive Trajectory · Progression Vulnerability
             </p>
         </div>
         """)
@@ -589,18 +587,19 @@ def create_gradio_app(engine: NeuroGATInferenceEngine) -> Optional['gr.Blocks']:
             with gr.Column(scale=1):
                 gr.Markdown("### 🏥 Patient Clinical Profile")
 
-                with gr.Accordion("Cognitive Biomarkers", open=True):
-                    mmse_slider = gr.Slider(0, 30, value=27, step=1, label="MMSE Score (Mini-Mental State Exam)")
-                    cdrsb_slider = gr.Slider(0.0, 18.0, value=1.0, step=0.5, label="CDR Sum of Boxes (CDR-SB)")
-                    logmem_d_slider = gr.Slider(0, 25, value=8, step=1, label="Logical Memory - Delayed Recall")
-                    logmem_i_slider = gr.Slider(0, 25, value=10, step=1, label="Logical Memory - Immediate Recall")
+                with gr.Accordion("Optional Cognitive Reference (Auxiliary / Non-Feature)", open=False):
+                    gr.Markdown("ℹ️ *Diagnostic proxies are auxiliary references only; they are strictly excluded from the NeuroGAT feature manifold to guarantee zero target leakage.*")
+                    mmse_slider = gr.Slider(0, 30, value=27, step=1, label="MMSE Score (Reference Only)")
+                    cdrsb_slider = gr.Slider(0.0, 18.0, value=1.0, step=0.5, label="CDR Sum of Boxes (Reference Only)")
+                    logmem_d_slider = gr.Slider(0, 25, value=8, step=1, label="Logical Memory - Delayed (Reference Only)")
+                    logmem_i_slider = gr.Slider(0, 25, value=10, step=1, label="Logical Memory - Immediate (Reference Only)")
 
-                with gr.Accordion("Demographics", open=True):
+                with gr.Accordion("Demographics (Input Features)", open=True):
                     age_slider = gr.Slider(40, 95, value=73, step=1, label="Age (years)")
                     edu_slider = gr.Slider(4, 22, value=16, step=1, label="Education (years)")
                     gender_radio = gr.Radio(["Male", "Female"], value="Male", label="Gender")
 
-                with gr.Accordion("Cardiovascular & Health Metrics", open=False):
+                with gr.Accordion("Cardiovascular & Health Metrics (Input Features)", open=True):
                     gds_slider = gr.Slider(0, 15, value=1, step=1, label="Geriatric Depression Scale (GDS)")
                     bp_slider = gr.Slider(80, 200, value=135, step=1, label="Systolic Blood Pressure (mmHg)")
                     pulse_slider = gr.Slider(40, 120, value=68, step=1, label="Heart Rate (BPM)")
@@ -631,7 +630,7 @@ def create_gradio_app(engine: NeuroGATInferenceEngine) -> Optional['gr.Blocks']:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9.3 Model Export (TorchScript & Deployment Manifest)
+# 11.3 Model Export (TorchScript & Deployment Manifest)
 # ═══════════════════════════════════════════════════════════════════
 
 def export_model(model: nn.Module, save_dir: Optional[str] = None):
@@ -654,7 +653,7 @@ def export_model(model: nn.Module, save_dir: Optional[str] = None):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 9.4 App Launcher & CLI Runner
+# 11.4 App Launcher & CLI Runner
 # ═══════════════════════════════════════════════════════════════════
 
 def launch_app(checkpoint_path: Optional[str] = None):
@@ -670,7 +669,7 @@ def launch_app(checkpoint_path: Optional[str] = None):
     sample_res = engine.predict(sample_patient)
     print(f"   Diagnosis: {sample_res['predicted_class']} (Confidence: {sample_res['confidence']*100:.1f}%)")
     print(f"   Continuous Cognitive MMSE: {sample_res['predicted_mmse']} / 30")
-    print(f"   24-Month MCI Conversion Hazard: {sample_res['conversion_risk_score']:.1f}% ({sample_res['conversion_risk_stratum']})\n")
+    print(f"   Disease Progression Vulnerability: {sample_res['conversion_risk_score']:.1f}% ({sample_res['conversion_risk_stratum']})\n")
 
     if GRADIO_AVAILABLE:
         app = create_gradio_app(engine)
@@ -683,7 +682,7 @@ def launch_app(checkpoint_path: Optional[str] = None):
 
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("  🏥 SECTION 9: NeuroGAT CLINICAL DECISION SUPPORT APPLICATION")
+    print("  🏥 SECTION 11: NeuroGAT CLINICAL DECISION SUPPORT & RESEARCH PROTOTYPE")
     print("="*70)
     launch_app()
 
