@@ -21,6 +21,14 @@
 # ═══════════════════════════════════════════════════════════════════
 import os
 import sys
+
+# Ensure UTF-8 output on Windows terminals
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import gc
 import glob
 import json
@@ -154,7 +162,7 @@ class Config:
     """Central configuration for the entire NeuroVolFormer pipeline."""
 
     # ── Project ──
-    PROJECT_NAME = "NeuroGAT_3D"
+    PROJECT_NAME = "NeuroVolFormer_3D"
     VERSION = "2.0.0"
 
     # ── Random Seed ──
@@ -171,6 +179,18 @@ class Config:
     # ── Input Dimensions ──
     INPUT_SIZE = (128, 128, 128)  # 3D volume size
     IN_CHANNELS = 1               # Grayscale MRI
+
+    # ── 3D CNN Encoder (NeuroVolFormer Spatial Backbone) ──
+    CNN_CHANNELS = [32, 64, 128, 256] # Multi-stage hierarchical 3D feature representation
+    CNN_DROPOUT = 0.2                 # Spatial dropout for CNN stages
+
+    # ── Transformer & Cross-Attention (NeuroVolFormer Hybrid) ──
+    PATCH_SIZE = (16, 16, 16)         # 3D volumetric tokenization patch size
+    D_MODEL = 256                     # Latent embedding dimension
+    N_HEADS = 4                       # Multi-head attention heads
+    N_LAYERS = 4                      # Transformer encoder depth
+    FFN_DIM = 512                     # Feed-forward hidden dimension
+    TRANSFORMER_DROPOUT = 0.1         # Self/Cross-attention dropout
 
     # ── 3D Feature Extraction (Pre-trained + Radiomics) ──
     DEEP_FEATURE_DIM = 1024       # Dimension from 3D MONAI DenseNet121
@@ -197,6 +217,7 @@ class Config:
 
     # ── Training Hyperparameters (GNN is Transductive Full-Batch) ──
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
+    GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
     EPOCHS = 300                  # Maximum training epochs
     PATIENCE = 50                 # Early stopping patience
 
@@ -368,9 +389,10 @@ def print_config(config: Config) -> None:
         'Model': ['NUM_CLASSES', 'INPUT_SIZE', 'IN_CHANNELS'],
         'CNN Encoder': ['CNN_CHANNELS', 'CNN_DROPOUT'],
         'Transformer': ['PATCH_SIZE', 'D_MODEL', 'N_HEADS', 'N_LAYERS', 'FFN_DIM', 'TRANSFORMER_DROPOUT'],
+        'Population Graph': ['KNN_K_LIST', 'GAT_HIDDEN_DIM', 'GAT_HEADS', 'GAT_DROPOUT', 'USE_DROPEDGE'],
         'Clinical': ['CLINICAL_DIM'],
         'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'LEARNING_RATE', 'WEIGHT_DECAY'],
-        'Loss': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_FOCAL_LOSS'],
+        'Loss & Balancing': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_LOGIT_ADJUSTMENT', 'USE_EFFECTIVE_NUM_SAMPLES', 'COST_EMCI_LMCI_PENALTY'],
         'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED'],
     }
     for cat_name, params in categories.items():
