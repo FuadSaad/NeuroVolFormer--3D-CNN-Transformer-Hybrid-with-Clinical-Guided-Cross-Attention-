@@ -120,12 +120,12 @@ def find_kaggle_path(pattern: str, is_dir: bool = False, default: str = "") -> s
     if default and os.path.exists(default):
         return default.replace('\\', '/')
 
-    clean_pat = pattern.lower().replace(' ', '').replace('_', '').replace('-', '')
+    clean_pat = pattern.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
 
     # 2. Check local current directory
     try:
         for f in os.listdir('.'):
-            clean_f = f.lower().replace(' ', '').replace('_', '').replace('-', '')
+            clean_f = f.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
             if clean_pat in clean_f:
                 p = os.path.abspath(f).replace('\\', '/')
                 if (is_dir and os.path.isdir(p)) or (not is_dir and os.path.isfile(p)):
@@ -139,7 +139,7 @@ def find_kaggle_path(pattern: str, is_dir: bool = False, default: str = "") -> s
         for root, dirs, files in os.walk(search_dir):
             targets = dirs if is_dir else files
             for t in targets:
-                clean_t = t.lower().replace(' ', '').replace('_', '').replace('-', '')
+                clean_t = t.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
                 if clean_pat in clean_t:
                     return os.path.join(root, t).replace('\\', '/')
 
