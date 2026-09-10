@@ -293,15 +293,22 @@ def prepare_clinical_features(
         except Exception:
             pass
 
-    clinical_cols = Config.CLINICAL_FEATURES
+    clinical_cols = list(getattr(Config, 'CLINICAL_FEATURES', [
+        'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
+    ]))
     available_cols = [c for c in clinical_cols if c in file_df.columns]
 
-    # Programmatic Guard: Verify no forbidden diagnostic proxies exist in available_cols
+    # Programmatic Guard: Verify and purge any forbidden diagnostic proxies
     forbidden_vars = getattr(Config, 'FORBIDDEN_GRAPH_VARIABLES', {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'})
     if not getattr(Config, 'INCLUDE_DIAGNOSTIC_PROXIES', False):
         leak_detected = set(available_cols) & forbidden_vars
         if leak_detected:
-            raise ValueError(f"CRITICAL LEAKAGE DETECTED: Forbidden variables {leak_detected} present in clinical feature inputs!")
+            print(f"🛡️  Programmatic Leakage Guard: Automatically sanitized clinical features!")
+            print(f"   Purged forbidden diagnostic proxies {leak_detected} from feature inputs to guarantee ZERO target leakage.")
+            available_cols = [c for c in available_cols if c not in forbidden_vars]
+            # Synchronize Config in memory to guarantee feature dimension consistency
+            Config.CLINICAL_FEATURES = [c for c in Config.CLINICAL_FEATURES if c not in forbidden_vars]
+            Config.CLINICAL_DIM = len(Config.CLINICAL_FEATURES)
 
     if len(available_cols) == 0:
         print("⚠️  No clinical features available, returning zeros")
@@ -585,7 +592,8 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
 
     # Plot 3: Clinical feature heatmap (mean per class)
     ax = axes[2]
-    available_cols = [c for c in Config.CLINICAL_FEATURES if c in file_df.columns]
+    forbidden_vars = getattr(Config, 'FORBIDDEN_GRAPH_VARIABLES', {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'})
+    available_cols = [c for c in Config.CLINICAL_FEATURES if c in file_df.columns and c not in forbidden_vars]
     if len(available_cols) > 0 and clinical_features is not None:
         class_means = []
         for cls_idx in range(Config.NUM_CLASSES):
