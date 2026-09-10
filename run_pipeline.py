@@ -52,7 +52,10 @@ def run_verify():
 def run_preprocess():
     print("▶️ Step: Preprocessing ADNI MRI Scans & Clinical Tabular Data...")
     import Section_03_Preprocessing
-    Section_03_Preprocessing.main()
+    if hasattr(Section_03_Preprocessing, 'run_preprocessing'):
+        Section_03_Preprocessing.run_preprocessing()
+    elif hasattr(Section_03_Preprocessing, 'main'):
+        Section_03_Preprocessing.main()
 
 def run_feature_extraction():
     print("▶️ Step: Extracting Multimodal Features (DenseNet121 + Radiomics + Clinical)...")
@@ -97,7 +100,9 @@ def run_xai():
     print("▶️ Step: Comprehensive Explainable AI (Attention Flow, Grad-CAM, Saliency, SHAP)...")
     f_path, l_path, _ = get_data_paths()
     import Section_09_Explainable_AI
-    if hasattr(Section_09_Explainable_AI, 'run_full_xai'):
+    if hasattr(Section_09_Explainable_AI, 'run_all_xai'):
+        Section_09_Explainable_AI.run_all_xai(f_path, l_path)
+    elif hasattr(Section_09_Explainable_AI, 'run_full_xai'):
         Section_09_Explainable_AI.run_full_xai(f_path, l_path)
     else:
         print("[INFO] Section 09 loaded. Running XAI routines...")

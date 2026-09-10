@@ -315,6 +315,22 @@ def run_feature_extraction(file_df: pd.DataFrame, clinical_features: pd.DataFram
     print(f"🎉 Extraction Complete!")
     print(f"📊 Feature Matrix Shape: {X.shape}")
 
+def main():
+    """Standalone/CLI execution entrypoint that loads splits and clinical checkpoints."""
+    output_dir = getattr(Config, 'OUTPUT_DIR', './outputs')
+    splits_path = os.path.join(output_dir, 'results', 'splits.pt')
+    clin_path = os.path.join(output_dir, 'results', 'clinical_data_v2.pt')
+
+    if os.path.exists(splits_path) and os.path.exists(clin_path):
+        splits_data = torch.load(splits_path, weights_only=False)
+        clin_data = torch.load(clin_path, weights_only=False)
+        f_df = splits_data['file_df']
+        c_feats = clin_data['features']
+        run_feature_extraction(f_df, c_feats)
+    else:
+        print("[INFO] Section 04B ready. Run Section 04 to generate data manifest and clinical features first.")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Execute Feature Extraction
 # ═══════════════════════════════════════════════════════════════════
@@ -326,3 +342,4 @@ try:
         print("Section 4B (Feature Extraction) Loaded.")
 except Exception as e:
     print(f"⚠️ Could not auto-run Section 4B: {e}")
+

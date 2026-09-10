@@ -516,3 +516,6 @@ def run_preprocessing():
 
 # Run preprocessing
 processed_df = run_preprocessing()
+
+# Entrypoint alias for run_pipeline
+main = run_preprocessing
