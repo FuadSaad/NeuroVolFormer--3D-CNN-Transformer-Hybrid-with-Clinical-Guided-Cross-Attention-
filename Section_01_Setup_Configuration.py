@@ -118,38 +118,59 @@ warnings.filterwarnings('ignore')
 # 1.2.5 Dynamic Path Resolution (For Robust Kaggle/Local Execution)
 # ═══════════════════════════════════════════════════════════════════
 
-def find_kaggle_path(pattern: str, is_dir: bool = False, default: str = "") -> str:
+def find_kaggle_path(patterns: Union[str, List[str]], is_dir: bool = False, default: str = "") -> str:
     """
-    Robust dynamic path locator for Kaggle datasets.
-    Searches /kaggle/input (supports /kaggle/input/datasets/username/... and /kaggle/input/...).
-    Falls back to local directory or default path with zero delay.
+    Robust dynamic path locator for Kaggle and local environments.
+    Supports multiple pattern aliases, handles Kaggle slugs, spaces, dashes, commas,
+    and performs recursive detection in /kaggle/input and current directory.
     """
-    # 1. If default exists, use it directly
+    if isinstance(patterns, str):
+        pat_list = [patterns]
+    else:
+        pat_list = list(patterns)
+
+    # 1. If default exists on disk right now, use it directly
     if default and os.path.exists(default):
         return default.replace('\\', '/')
 
-    clean_pat = pattern.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
+    def _clean(s: str) -> str:
+        return s.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '').replace('.', '')
 
-    # 2. Check local current directory
-    try:
-        for f in os.listdir('.'):
-            clean_f = f.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
-            if clean_pat in clean_f:
-                p = os.path.abspath(f).replace('\\', '/')
-                if (is_dir and os.path.isdir(p)) or (not is_dir and os.path.isfile(p)):
-                    return p
-    except Exception:
-        pass
+    clean_pats = [_clean(p) for p in pat_list]
 
-    # 3. If running on Kaggle, search /kaggle/input
+    # 2. Check local directory candidates
+    for base in ['.', '..', 'data']:
+        if os.path.exists(base):
+            try:
+                for entry in os.listdir(base):
+                    full_p = os.path.join(base, entry)
+                    if (is_dir and os.path.isdir(full_p)) or (not is_dir and os.path.isfile(full_p)):
+                        clean_entry = _clean(entry)
+                        for cp in clean_pats:
+                            if cp in clean_entry or clean_entry in cp:
+                                return os.path.abspath(full_p).replace('\\', '/')
+            except Exception:
+                pass
+
+    # 3. If running on Kaggle, search /kaggle/input thoroughly
     search_dir = '/kaggle/input'
     if os.path.exists(search_dir):
+        # 3a. Exact or substring match in targets
         for root, dirs, files in os.walk(search_dir):
             targets = dirs if is_dir else files
             for t in targets:
-                clean_t = t.lower().replace(' ', '').replace('_', '').replace('-', '').replace(',', '')
-                if clean_pat in clean_t:
-                    return os.path.join(root, t).replace('\\', '/')
+                clean_t = _clean(t)
+                for cp in clean_pats:
+                    if cp == clean_t or (len(cp) >= 3 and (cp in clean_t or clean_t in cp)):
+                        return os.path.join(root, t).replace('\\', '/')
+
+        # 3b. For directories, check if root folder itself is the dataset
+        if is_dir:
+            for root, dirs, files in os.walk(search_dir):
+                clean_root = _clean(os.path.basename(root))
+                for cp in clean_pats:
+                    if cp == clean_root or (len(cp) >= 3 and cp in clean_root):
+                        return root.replace('\\', '/')
 
     return default.replace('\\', '/')
 
@@ -277,20 +298,56 @@ class Config:
     # ── Checkpointing ──
     CHECKPOINT_INTERVAL = 5  # Save every N epochs
 
-    # ── Kaggle Dataset Paths (Supports user namespaces & standard paths) ──
+    # ── Kaggle Dataset Paths (Auto-resolves across all Kaggle naming conventions) ──
     DATA_PATHS = {
-        'AD': find_kaggle_path('MPRAGE ad', is_dir=True, default='/kaggle/input/datasets/mdfuadhossainsaad/ad-mprage/MPRAGE ad'),
-        'CN': find_kaggle_path('MPRAGE cn', is_dir=True, default='/kaggle/input/datasets/mdfuadhossainsaad/cn-mprage/MPRAGE cn'),
-        'EMCI': find_kaggle_path('MPRAGE EMCI', is_dir=True, default='/kaggle/input/datasets/mdfuadhossainsaad/emci-mprage/MPRAGE EMCI'),
-        'LMCI': find_kaggle_path('MPRAGE LMCI', is_dir=True, default='/kaggle/input/datasets/mdfuadhossainsaad/lmci-mprage/MPRAGE LMCI'),
+        'AD': find_kaggle_path(
+            ['MPRAGE ad', 'ad-mprage', 'AD MPRAGE', 'MPRAGE_ad'],
+            is_dir=True,
+            default='/kaggle/input/ad-mprage/MPRAGE ad'
+        ),
+        'CN': find_kaggle_path(
+            ['MPRAGE cn', 'cn-mprage', 'CN MPRAGE', 'MPRAGE_cn'],
+            is_dir=True,
+            default='/kaggle/input/cn-mprage/MPRAGE cn'
+        ),
+        'EMCI': find_kaggle_path(
+            ['MPRAGE EMCI', 'emci-mprage', 'EMCI MPRAGE', 'MPRAGE_EMCI'],
+            is_dir=True,
+            default='/kaggle/input/emci-mprage/MPRAGE EMCI'
+        ),
+        'LMCI': find_kaggle_path(
+            ['MPRAGE LMCI', 'lmci-mprage', 'LMCI MPRAGE', 'MPRAGE_LMCI'],
+            is_dir=True,
+            default='/kaggle/input/lmci-mprage/MPRAGE LMCI'
+        ),
     }
     CSV_PATHS = {
-        'AD': find_kaggle_path('MPRAGE_ad', is_dir=False, default='/kaggle/input/datasets/mdfuadhossainsaad/ad-mprage/MPRAGE_ad_7_01_2026.csv'),
-        'CN': find_kaggle_path('MPRAGE_cn', is_dir=False, default='/kaggle/input/datasets/mdfuadhossainsaad/cn-mprage/MPRAGE_cn_7_06_2026.csv'),
-        'EMCI': find_kaggle_path('MPRAGE_EMCI', is_dir=False, default='/kaggle/input/datasets/mdfuadhossainsaad/emci-mprage/MPRAGE_EMCI_7_01_2026.csv'),
-        'LMCI': find_kaggle_path('MPRAGE_LMCI', is_dir=False, default='/kaggle/input/datasets/mdfuadhossainsaad/lmci-mprage/MPRAGE_LMCI_6_30_2026.csv'),
+        'AD': find_kaggle_path(
+            ['MPRAGE_ad', 'MPRAGE_ad_7_01_2026.csv', 'ad_mprage.csv', 'ad.csv'],
+            is_dir=False,
+            default='/kaggle/input/ad-mprage/MPRAGE_ad_7_01_2026.csv'
+        ),
+        'CN': find_kaggle_path(
+            ['MPRAGE_cn', 'MPRAGE_cn_7_06_2026.csv', 'cn_mprage.csv', 'cn.csv'],
+            is_dir=False,
+            default='/kaggle/input/cn-mprage/MPRAGE_cn_7_06_2026.csv'
+        ),
+        'EMCI': find_kaggle_path(
+            ['MPRAGE_EMCI', 'MPRAGE_EMCI_7_01_2026.csv', 'emci_mprage.csv', 'emci.csv'],
+            is_dir=False,
+            default='/kaggle/input/emci-mprage/MPRAGE_EMCI_7_01_2026.csv'
+        ),
+        'LMCI': find_kaggle_path(
+            ['MPRAGE_LMCI', 'MPRAGE_LMCI_6_30_2026.csv', 'lmci_mprage.csv', 'lmci.csv'],
+            is_dir=False,
+            default='/kaggle/input/lmci-mprage/MPRAGE_LMCI_6_30_2026.csv'
+        ),
     }
-    CLINICAL_CSV = find_kaggle_path('adnicorefeatures', is_dir=False, default='/kaggle/input/datasets/mdfuadhossainsaad/adniclinical-data/adnicorefeatures.csv')
+    CLINICAL_CSV = find_kaggle_path(
+        ['adnicorefeatures', 'adnicorefeatures.csv', 'adniclinical', 'ADNI,clinical-Data', 'clinical'],
+        is_dir=False,
+        default='/kaggle/input/adniclinical-data/adnicorefeatures.csv'
+    )
 
     # ── Output Paths (Auto-detect Kaggle vs Local environment) ──
     IS_KAGGLE = os.path.exists('/kaggle')
@@ -584,8 +641,13 @@ def verify_dataset_paths() -> None:
     print("-" * 70)
     if all_found:
         print("🎉 ALL DATASET PATHS VERIFIED & ACCESSIBLE!")
+    elif not os.path.exists('/kaggle/input'):
+        print("💻 Environment Detected: Local PC (Windows).")
+        print("ℹ️  Metadata CSV files are verified above.")
+        print("ℹ️  3D MRI volume directories point to canonical Kaggle paths (/kaggle/input/...).")
+        print("    When executed on Kaggle, the datasets mounted in /kaggle/input will be auto-detected.")
     else:
-        print("ℹ️ Note: Unfound paths will be searched dynamically under /kaggle/input at runtime.")
+        print("ℹ️ Note: Paths not immediately found will be searched dynamically under /kaggle/input at runtime.")
     print("=" * 70 + "\n")
 
 
