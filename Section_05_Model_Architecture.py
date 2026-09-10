@@ -12,7 +12,7 @@
 
 import os
 import math
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union, Any
 import numpy as np
 import torch
 import torch.nn as nn
@@ -34,10 +34,11 @@ if 'Config' not in globals() and 'Config' not in locals():
             pass
 
 _defaults = {
-    'GAT_HIDDEN_DIM': 128, 'GAT_HEADS': 4, 'GAT_DROPOUT': 0.3,
-    'CLASSIFIER_DROPOUT': 0.4, 'NUM_CLASSES': 4, 'KNN_K': 5,
-    'DEEP_FEATURE_DIM': 1024, 'RADIOMICS_FEATURE_DIM': 68, 'CLINICAL_DIM': 10,
-    'EPOCHS': 300, 'PATIENCE': 50, 'LEARNING_RATE': 5e-4, 'WEIGHT_DECAY': 0.01,
+    'GAT_HIDDEN_DIM': 128, 'GAT_HEADS': 4, 'GAT_DROPOUT': 0.15,
+    'CLASSIFIER_DROPOUT': 0.20, 'NUM_CLASSES': 4, 'KNN_K': 5,
+    'PCA_DIM': 64,
+    'DEEP_FEATURE_DIM': 1024, 'RADIOMICS_FEATURE_DIM': 68, 'CLINICAL_DIM': 6,
+    'EPOCHS': 200, 'PATIENCE': 40, 'LEARNING_RATE': 5e-4, 'WEIGHT_DECAY': 1e-4,
     'OUTPUT_DIR': '/kaggle/working/outputs' if os.path.exists('/kaggle') else './outputs',
     'CHECKPOINT_DIR': '/kaggle/working/checkpoints' if os.path.exists('/kaggle') else './checkpoints',
     'FIGURES_DIR': '/kaggle/working/outputs/figures' if os.path.exists('/kaggle') else './outputs/figures',
@@ -83,11 +84,12 @@ def build_multiscale_population_graph(
 
     # 2. Dimensionality Reduction for Deep Features if raw 1024-D
     if features.shape[1] >= 1024:
+        pca_dim = getattr(Config, 'PCA_DIM', 64)
         deep_features = features[:, :1024]
         handcrafted = features[:, 1024:]
 
-        print("🧠 Applying PCA to Deep Features (1024 -> 32 dims)...")
-        pca = PCA(n_components=32, random_state=42)
+        print(f"🧠 Applying PCA to Deep Features (1024 -> {pca_dim} dims)...")
+        pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
         if train_indices is not None and len(train_indices) > 0:
             print("🛡️  Fold Isolation: Fitting PCA strictly on training fold indices...")
             pca.fit(deep_features[train_indices])
@@ -171,24 +173,27 @@ class CrossModalAttentionFusion(nn.Module):
     def __init__(
         self,
         feature_dim: int,
-        deep_dim: int = 32,
+        deep_dim: int = 64,
         radio_dim: int = 68,
-        clin_dim: int = 10,
+        clin_dim: int = 6,
         embed_dim: int = 64,
         num_heads: int = 4,
-        dropout: float = 0.2
+        dropout: float = 0.1
     ):
         super().__init__()
         self.feature_dim = feature_dim
         self.embed_dim = embed_dim
 
-        # Determine exact modality dimensions
-        if feature_dim >= 110:
-            self.deep_dim = deep_dim
-            self.radio_dim = radio_dim
-            self.clin_dim = feature_dim - (deep_dim + radio_dim)
-        elif feature_dim >= 100:
-            self.deep_dim = min(deep_dim, feature_dim)
+        # Determine exact modality dimensions dynamically
+        configured_deep = getattr(Config, 'PCA_DIM', deep_dim)
+        configured_radio = getattr(Config, 'RADIOMICS_FEATURE_DIM', radio_dim)
+
+        if feature_dim > (configured_deep + configured_radio):
+            self.deep_dim = configured_deep
+            self.radio_dim = configured_radio
+            self.clin_dim = feature_dim - (self.deep_dim + self.radio_dim)
+        elif feature_dim > configured_deep:
+            self.deep_dim = configured_deep
             self.radio_dim = feature_dim - self.deep_dim
             self.clin_dim = 0
         else:
@@ -295,11 +300,18 @@ class NeuroGAT(nn.Module):
 
         hidden_dim = getattr(Config, 'GAT_HIDDEN_DIM', 128)
         heads = getattr(Config, 'GAT_HEADS', 4)
-        self.gat_dropout = getattr(Config, 'GAT_DROPOUT', 0.3)
-        self.classifier_dropout = getattr(Config, 'CLASSIFIER_DROPOUT', 0.4)
+        self.gat_dropout = getattr(Config, 'GAT_DROPOUT', 0.15)
+        self.classifier_dropout = getattr(Config, 'CLASSIFIER_DROPOUT', 0.20)
 
         # 1. Cross-Modal Fusion
-        self.fusion = CrossModalAttentionFusion(feature_dim=in_channels, num_heads=2, dropout=0.2)
+        self.fusion = CrossModalAttentionFusion(
+            feature_dim=in_channels,
+            deep_dim=getattr(Config, 'PCA_DIM', 64),
+            radio_dim=getattr(Config, 'RADIOMICS_FEATURE_DIM', 68),
+            embed_dim=64,
+            num_heads=2,
+            dropout=getattr(Config, 'TRANSFORMER_DROPOUT', 0.1)
+        )
 
         # 2. Layer 1: Multi-Head GATv2
         self.gat1 = geom_nn.GATv2Conv(
@@ -437,8 +449,10 @@ if __name__ == "__main__":
         dummy_mmse = np.random.uniform(0.0, 1.0, 100)
 
         graph = build_multiscale_population_graph(
-            dummy_feat, dummy_labels, k_list=[3, 5, 10], cognitive_scores=dummy_mmse
+            dummy_feat, k_list=[3, 5, 10]
         )
+        graph.y = torch.tensor(dummy_labels, dtype=torch.long)
+        graph.cog_y = torch.tensor(dummy_mmse, dtype=torch.float32).unsqueeze(1)
 
         model = NeuroGAT(in_channels=graph.x.shape[1])
         model.eval()

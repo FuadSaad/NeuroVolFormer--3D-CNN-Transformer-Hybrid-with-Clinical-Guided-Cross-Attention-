@@ -272,7 +272,7 @@ class GNNTrainer:
         self.graph = graph_data.to(device)
         self.fold_idx = fold_idx
         self.device = device
-        self.lambda_cog = 0.1  # Auxiliary cognitive task loss weight
+        self.lambda_cog = getattr(Config, 'AUX_COG_WEIGHT', 0.02)  # Auxiliary cognitive task loss weight (calibrated)
 
         # Clinical cognitive impairment severity prior (0: AD, 1: CN, 2: EMCI, 3: LMCI)
         self.severity_prior = torch.tensor([0.85, 0.10, 0.35, 0.65], dtype=torch.float32).to(device)
@@ -282,29 +282,30 @@ class GNNTrainer:
 
         # Optimizer with weight decay
         lr = getattr(Config, 'LEARNING_RATE', 5e-4)
-        weight_decay = getattr(Config, 'L2_REGULARIZATION', getattr(Config, 'WEIGHT_DECAY', 5e-4))
+        weight_decay = getattr(Config, 'L2_REGULARIZATION', getattr(Config, 'WEIGHT_DECAY', 1e-4))
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=lr,
             weight_decay=weight_decay
         )
 
-        # Anti-Overfitting Learning Rate Scheduler
-        scheduler_type = getattr(Config, 'LR_SCHEDULER_TYPE', 'ReduceLROnPlateau')
+        # Learning Rate Scheduler (Prevents premature freeze while preserving stability)
+        scheduler_type = getattr(Config, 'LR_SCHEDULER_TYPE', 'CosineAnnealingWarmRestarts')
         if scheduler_type == 'ReduceLROnPlateau':
-            factor = getattr(Config, 'LR_PLATEAU_FACTOR', 0.5)
-            patience_lr = getattr(Config, 'LR_PLATEAU_PATIENCE', 5)
+            factor = getattr(Config, 'LR_PLATEAU_FACTOR', 0.7)
+            patience_lr = getattr(Config, 'LR_PLATEAU_PATIENCE', 12)
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer, mode='min', factor=factor, patience=patience_lr, min_lr=1e-6
+                self.optimizer, mode='min', factor=factor, patience=patience_lr, min_lr=1e-5
             )
             self.is_plateau_scheduler = True
         else:
-            t_0 = getattr(Config, 'T_0', 20)
+            t_0 = getattr(Config, 'T_0', 25)
             t_mult = getattr(Config, 'T_MULT', 2)
             self.scheduler = CosineAnnealingWarmRestarts(
                 self.optimizer,
                 T_0=t_0,
-                T_mult=t_mult
+                T_mult=t_mult,
+                eta_min=1e-5
             )
             self.is_plateau_scheduler = False
 
@@ -471,8 +472,8 @@ class GNNTrainer:
             )
 
     def fit(self, epochs: Optional[int] = None, patience: Optional[int] = None) -> Dict[str, Any]:
-        epochs = epochs if epochs is not None else getattr(Config, 'EPOCHS', 300)
-        patience = patience if patience is not None else getattr(Config, 'PATIENCE', 15)
+        epochs = epochs if epochs is not None else getattr(Config, 'EPOCHS', 200)
+        patience = patience if patience is not None else getattr(Config, 'PATIENCE', 40)
         ckpt_dir = getattr(Config, 'CHECKPOINT_DIR', '/kaggle/working/checkpoints')
         os.makedirs(ckpt_dir, exist_ok=True)
         best_ckpt_path = os.path.join(ckpt_dir, f'fold{self.fold_idx}_best.pt')

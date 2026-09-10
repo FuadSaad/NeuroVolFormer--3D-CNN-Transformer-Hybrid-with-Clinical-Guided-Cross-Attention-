@@ -87,7 +87,14 @@ def get_interpretable_feature_names(total_dim: int) -> List[str]:
     while len(radiomics_names) < 68:
         radiomics_names.append(f"Radiomics_Texture_{len(radiomics_names) + 1}")
 
-    if total_dim == 32 + 68 + n_clin:  # Standard PCA fused input (32 PCA + 68 Radiomics + 6 Demographics = 106-D)
+    pca_dim = getattr(Config, 'PCA_DIM', 64)
+    if total_dim == pca_dim + 68 + n_clin:  # Dynamic PCA fused input
+        deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(pca_dim)]
+        return deep_names + radiomics_names[:68] + clinical_names
+    elif total_dim == pca_dim + 68:
+        deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(pca_dim)]
+        return deep_names + radiomics_names[:68]
+    elif total_dim == 32 + 68 + n_clin:  # Fallback 32 PCA fused input
         deep_names = [f"Deep_PCA_{i+1:02d}" for i in range(32)]
         return deep_names + radiomics_names[:68] + clinical_names
     elif total_dim == 100:  # 32 PCA + 68 Radiomics
@@ -556,7 +563,8 @@ def run_all_xai(features_path: str, labels_path: str):
 
     # Apply PCA on deep features if needed
     if X_raw.shape[1] >= 1024:
-        pca = PCA(n_components=32, random_state=Config.SEED)
+        pca_dim = getattr(Config, 'PCA_DIM', 64)
+        pca = PCA(n_components=pca_dim, random_state=Config.SEED)
         deep_pca = pca.fit_transform(X_raw[:, :1024])
         X = np.concatenate([deep_pca, X_raw[:, 1024:]], axis=1)
     else:

@@ -156,12 +156,13 @@ def run_ml_baselines(features_path: str, labels_path: str):
 
     # Standardize input representation to match NeuroGAT symmetrically
     if X_raw.shape[1] >= 1024:
-        pca = PCA(n_components=32, random_state=Config.SEED)
+        pca_dim = getattr(Config, 'PCA_DIM', 64)
+        pca = PCA(n_components=pca_dim, random_state=Config.SEED)
         pca.fit(X_raw[train_val_indices, :1024])
         deep_pca = pca.transform(X_raw[:, :1024])
         handcrafted_and_clin = X_raw[:, 1024:]
         X = np.concatenate([deep_pca, handcrafted_and_clin], axis=1)
-        print(f"📊 Symmetrical Modality Parity: 3D PCA (32) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
+        print(f"📊 Symmetrical Modality Parity: 3D PCA ({pca_dim}) + Radiomics/Demographics ({handcrafted_and_clin.shape[1]}) = {X.shape[1]} dims")
     else:
         X = X_raw.copy()
 

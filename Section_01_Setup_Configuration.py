@@ -215,6 +215,7 @@ class Config:
 
     # ── 3D Feature Extraction (Pre-trained + Radiomics) ──
     DEEP_FEATURE_DIM = 1024       # Dimension from 3D MONAI DenseNet121
+    PCA_DIM = 64                  # Preserves 64 principal components of 3D spatial variance
     RADIOMICS_FEATURE_DIM = 68    # Standard PyRadiomics texture feature count
 
     # ── Graph Neural Network (NeuroGAT A* Edition) ──
@@ -222,9 +223,9 @@ class Config:
     KNN_K_LIST = [3, 5, 10]       # Multi-scale neighborhood (Micro, Meso, Macro)
     GAT_HIDDEN_DIM = 128          # Hidden dimensions in GATv2 layers
     GAT_HEADS = 4                 # Multi-head attention heads in GATv2
-    GAT_DROPOUT = 0.35            # Calibrated dropout for regularized graph representation
-    L2_REGULARIZATION = 1e-3      # Weight decay for GAT
-    AUX_COG_WEIGHT = 0.1          # Multi-task auxiliary cognitive loss weight
+    GAT_DROPOUT = 0.15            # Calibrated dropout for graph representation (relaxed from 0.35 to prevent underfitting)
+    L2_REGULARIZATION = 1e-4      # Weight decay for GAT (relaxed from 1e-3)
+    AUX_COG_WEIGHT = 0.02         # Balanced auxiliary cognitive loss weight (prevents 1D regression from dominating 4-class manifold)
 
     # ── Cohort Participant-Level Independence ──
     ONE_SCAN_PER_SUBJECT = True   # The one-scan-per-subject protocol eliminates within-subject repeated-measure dependence.
@@ -237,36 +238,36 @@ class Config:
     CLINICAL_DIM = len(CLINICAL_FEATURES)
 
     FEATURE_SCHEMA = {
-        'deep_mri': '3D DenseNet-121 / Native 3D CNN (1024-D -> PCA 32-D)',
+        'deep_mri': '3D DenseNet-121 / Native 3D CNN (1024-D -> PCA 64-D)',
         'radiomics': 'PyRadiomics Handcrafted Morphological & Texture Features (68-D)',
         'demographics': CLINICAL_DEMOGRAPHICS
     }
     FORBIDDEN_GRAPH_VARIABLES = {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'}
 
     # ── Classifier Head ──
-    CLASSIFIER_DROPOUT = 0.45     # Calibrated dropout to balance capacity and regularization
+    CLASSIFIER_DROPOUT = 0.20     # Calibrated dropout (relaxed from 0.45 to prevent underfitting on 472 train nodes)
 
     # ── Training Hyperparameters (GNN is Transductive Full-Batch) ──
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
     GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
-    EPOCHS = 300                  # Maximum training epochs
-    PATIENCE = 15                 # Early stopping patience (halts training when val_loss ceases improvement)
+    EPOCHS = 200                  # Maximum training epochs
+    PATIENCE = 40                 # Early stopping patience
     MONITOR_METRIC = 'val_loss'   # Monitor validation loss strictly
 
     # ── Optimizer & Anti-Overfitting Learning Rate Scheduler ──
     LEARNING_RATE = 5e-4          # Optimal learning rate for AdamW
-    WEIGHT_DECAY = 0.005          # Calibrated weight decay
+    WEIGHT_DECAY = 1e-4           # Calibrated weight decay (1e-4 avoids stifling capacity)
     BETAS = (0.9, 0.999)
-    LR_SCHEDULER_TYPE = 'ReduceLROnPlateau'  # 'ReduceLROnPlateau' halts overfitting by decaying LR on val_loss plateaus
-    LR_PLATEAU_FACTOR = 0.5       # Halve learning rate when validation loss plateaus
-    LR_PLATEAU_PATIENCE = 5       # Epochs to wait before reducing LR
+    LR_SCHEDULER_TYPE = 'CosineAnnealingWarmRestarts'  # Cyclic exploration prevents premature stagnation
+    LR_PLATEAU_FACTOR = 0.7       # Smooth decay if ReduceLROnPlateau selected
+    LR_PLATEAU_PATIENCE = 12      # Sufficient patience before reducing LR
     WARMUP_EPOCHS = 10
-    T_0 = 20                      # Fallback period if CosineAnnealing is selected
+    T_0 = 25                      # Period for CosineAnnealingWarmRestarts
     T_MULT = 2
 
     # ── Loss & Cost-Sensitive Learning (Targeting 85-88% with Calibrated LMCI F1) ──
     LABEL_SMOOTHING = 0.05        # Label smoothing for focal loss
-    FOCAL_GAMMA = 1.5             # Mild focusing parameter (1.5 prevents majority overconfidence without over-penalizing)
+    FOCAL_GAMMA = 1.0             # Balanced focusing parameter (1.0 prevents over-suppression of gradients)
     USE_FOCAL_LOSS = True         # True=ClassBalancedFocalLoss
     CUSTOM_CLASS_WEIGHTS = [1.0, 1.0, 1.0, 1.0]  # Neutral base weights
     USE_CUSTOM_CLASS_WEIGHTS = False             # False: rely on mathematically pure Effective Number of Samples (Cui et al., CVPR 2019)
@@ -282,7 +283,7 @@ class Config:
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
     USE_DROPEDGE = True                          # Graph data augmentation & over-smoothing prevention
-    DROPEDGE_RATE = 0.15                         # Probability of randomly dropping edges during train
+    DROPEDGE_RATE = 0.05                         # Calibrated DropEdge (relaxed from 0.15 to preserve small-graph connectivity)
     BOOTSTRAP_ITERATIONS = 1000                  # 1,000 resamplings for 95% Confidence Intervals
     MCNEMAR_CORRECTION = 'holm-bonferroni'       # Stepwise family-wise error rate control
     GENERATE_LATEX_TABLES = True                 # Export camera-ready booktabs .tex tables

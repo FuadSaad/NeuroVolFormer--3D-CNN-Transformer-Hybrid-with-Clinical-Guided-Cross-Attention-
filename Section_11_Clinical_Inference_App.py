@@ -131,7 +131,8 @@ class NeuroGATInferenceEngine:
 
                 # Apply standard PCA reduction if raw 1024-D
                 if raw_feat.shape[1] >= 1024:
-                    pca = PCA(n_components=32, random_state=42)
+                    pca_dim = getattr(Config, 'PCA_DIM', 64)
+                    pca = PCA(n_components=pca_dim, random_state=42)
                     deep_pca = pca.fit_transform(raw_feat[:, :1024])
                     self.ref_features = np.concatenate([deep_pca, raw_feat[:, 1024:]], axis=1)
                 else:
