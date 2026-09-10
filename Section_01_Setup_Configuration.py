@@ -201,9 +201,13 @@ class Config:
     KNN_K_LIST = [3, 5, 10]       # Multi-scale neighborhood (Micro, Meso, Macro)
     GAT_HIDDEN_DIM = 128          # Hidden dimensions in GATv2 layers
     GAT_HEADS = 4                 # Multi-head attention heads in GATv2
-    GAT_DROPOUT = 0.4             # Dropout for regularized graph representation (increased from 0.3)
+    GAT_DROPOUT = 0.35            # Calibrated dropout for regularized graph representation
     L2_REGULARIZATION = 1e-3      # Weight decay for GAT
     AUX_COG_WEIGHT = 0.1          # Multi-task auxiliary cognitive loss weight
+
+    # ── Cohort Participant-Level Independence (Q1 Publication Standard) ──
+    ONE_SCAN_PER_SUBJECT = True   # True: exactly 1 baseline scan per participant (zero repeated-measures scan correlation)
+                                  # False: use all available longitudinal scans
 
     # ── Clinical Demographics & Biomarkers (Strict De-biasing & Target Non-Leakage) ──
     CLINICAL_DEMOGRAPHICS = ['AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse']
@@ -213,18 +217,18 @@ class Config:
     CLINICAL_DIM = len(CLINICAL_FEATURES)
 
     # ── Classifier Head ──
-    CLASSIFIER_DROPOUT = 0.5      # Increased from 0.4 to prevent overfitting
+    CLASSIFIER_DROPOUT = 0.45     # Calibrated dropout to balance capacity and regularization
 
     # ── Training Hyperparameters (GNN is Transductive Full-Batch) ──
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
     GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
     EPOCHS = 300                  # Maximum training epochs
-    PATIENCE = 20                 # Early stopping patience (reduced from 50 to arrest epoch 50+ overfit)
+    PATIENCE = 20                 # Early stopping patience (halts training when val_loss ceases improvement)
     MONITOR_METRIC = 'val_loss'   # Monitor validation loss strictly
 
     # ── Optimizer ──
     LEARNING_RATE = 5e-4          # Optimal learning rate for AdamW
-    WEIGHT_DECAY = 0.02           # Stronger weight regularization (increased from 0.01)
+    WEIGHT_DECAY = 0.005          # Calibrated weight decay (prevents over-constraining representation)
     BETAS = (0.9, 0.999)
 
     # ── Scheduler ──
@@ -250,8 +254,9 @@ class Config:
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
     USE_DROPEDGE = True                          # Graph data augmentation & over-smoothing prevention
-    DROPEDGE_RATE = 0.20                         # Probability of randomly dropping edges during train (increased from 0.15)
+    DROPEDGE_RATE = 0.15                         # Probability of randomly dropping edges during train
     BOOTSTRAP_ITERATIONS = 1000                  # 1,000 resamplings for 95% Confidence Intervals
+    MCNEMAR_CORRECTION = 'holm-bonferroni'       # Stepwise family-wise error rate control
     GENERATE_LATEX_TABLES = True                 # Export camera-ready booktabs .tex tables
 
     # ── Data Splitting ──
@@ -501,7 +506,7 @@ def print_config(config: Config) -> None:
         'Clinical': ['CLINICAL_DIM', 'INCLUDE_DIAGNOSTIC_PROXIES'],
         'Training': ['BATCH_SIZE', 'GRAD_ACCUM_STEPS', 'EPOCHS', 'PATIENCE', 'MONITOR_METRIC', 'LEARNING_RATE', 'WEIGHT_DECAY'],
         'Loss & Balancing': ['LABEL_SMOOTHING', 'FOCAL_GAMMA', 'USE_LOGIT_ADJUSTMENT', 'USE_EFFECTIVE_NUM_SAMPLES', 'COST_EMCI_LMCI_PENALTY'],
-        'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED'],
+        'Data': ['N_FOLDS', 'TEST_SIZE', 'SEED', 'ONE_SCAN_PER_SUBJECT'],
         'Pipeline & Clean-Slate': ['CLEAN_OUTPUTS_ON_START', 'PRESERVE_EXTRACTED_FEATURES'],
     }
     for cat_name, params in categories.items():

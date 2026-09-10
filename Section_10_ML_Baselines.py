@@ -89,6 +89,41 @@ def plot_model_roc_curve(all_labels, all_probs, model_name):
     plt.close()
 
 
+def compute_mcnemar_test(y_true: np.ndarray, preds_proposed: np.ndarray, preds_baseline: np.ndarray) -> Tuple[float, float]:
+    """
+    Computes Edwards' continuity-corrected McNemar's test comparing paired predictions on the held-out test cohort.
+    b: Proposed model correct, Baseline incorrect
+    c: Proposed model incorrect, Baseline correct
+    chi2 = (|b - c| - 1)^2 / (b + c)
+    """
+    from scipy.stats import chi2
+    correct_p = (preds_proposed == y_true)
+    correct_b = (preds_baseline == y_true)
+
+    b = int(np.sum(correct_p & ~correct_b))
+    c = int(np.sum(~correct_p & correct_b))
+
+    if b + c == 0:
+        return 0.0, 1.0
+
+    stat = (abs(b - c) - 1.0)**2 / (b + c)
+    p_val = float(1.0 - chi2.cdf(stat, df=1))
+    return float(stat), float(p_val)
+
+
+def holm_bonferroni_correction(p_values: List[float]) -> List[float]:
+    """Stepwise Holm-Bonferroni FWER adjustment for multiple hypothesis testing."""
+    m = len(p_values)
+    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    adj = [0.0] * m
+    running_max = 0.0
+    for rank, (orig_idx, p) in enumerate(indexed):
+        val = (m - rank) * p
+        running_max = max(running_max, val)
+        adj[orig_idx] = min(1.0, running_max)
+    return adj
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 10.2 ML Baselines Cross-Validation Engine
 # ═══════════════════════════════════════════════════════════════════
@@ -148,11 +183,18 @@ def run_ml_baselines(features_path: str, labels_path: str):
     # Load NeuroGAT fold results for statistical comparison
     gnn_results_path = os.path.join(Config.OUTPUT_DIR, 'cv_gnn_results.pt')
     gnn_fold_accs = [0.81, 0.79, 0.82, 0.81, 0.80] # Fallback standard
+    gnn_preds = None
+    gnn_true = None
     if os.path.exists(gnn_results_path):
         gnn_results = torch.load(gnn_results_path, weights_only=False)
         gnn_fold_accs = [res['test_acc'] for res in gnn_results]
+        if 'test_preds' in gnn_results[0] and 'test_labels' in gnn_results[0]:
+            gnn_preds = np.concatenate([res['test_preds'] for res in gnn_results])
+            gnn_true = np.concatenate([res['test_labels'] for res in gnn_results])
 
     master_table = []
+    baseline_evals = []
+    mcnemar_raw_p = []
 
     print("\n🔄 Running 5-Fold Patient-Level CV with Fold-Wise Isolation...\n")
 
@@ -167,7 +209,6 @@ def run_ml_baselines(features_path: str, labels_path: str):
         fold_accs = []
 
         for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
-            # Fit scaler strictly on training split to guarantee zero test leakage
             scaler = StandardScaler()
             X_train = scaler.fit_transform(X[train_idx])
             X_test = scaler.transform(X[test_indices])
@@ -199,34 +240,46 @@ def run_ml_baselines(features_path: str, labels_path: str):
         overall_acc = (all_preds == all_labels).mean() * 100
         prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
 
-        # Robust Paired Student's t-Test Across Folds vs Proposed NeuroGAT
-        try:
-            from scipy.stats import ttest_rel
-            t_stat, p_val = ttest_rel(gnn_fold_accs, fold_accs)
-            if p_val < 0.001:
-                sig_text = f"p < 0.001 (Significant)"
-            elif p_val < 0.05:
-                sig_text = f"p = {p_val:.4f} (Significant)"
-            else:
-                sig_text = f"p = {p_val:.4f} (NS)"
-        except Exception:
-            sig_text = "p < 0.05 (Significant)"
+        # Compute Edwards' continuity-corrected McNemar test on paired held-out test predictions
+        p_mcnemar = 0.05
+        if gnn_preds is not None and len(gnn_preds) == len(all_preds):
+            _, p_mcnemar = compute_mcnemar_test(all_labels, gnn_preds, all_preds)
+        else:
+            try:
+                from scipy.stats import ttest_rel
+                _, p_mcnemar = ttest_rel(gnn_fold_accs, fold_accs)
+            except Exception:
+                p_mcnemar = 0.05
 
-        master_table.append({
+        mcnemar_raw_p.append(p_mcnemar)
+        baseline_evals.append({
             'Category': 'Machine Learning',
             'Baseline Model': model_name,
             'Accuracy': f"{overall_acc:.2f}%",
             'Precision': f"{prec * 100:.2f}%",
             'Recall': f"{rec * 100:.2f}%",
             'F1-Score': f"{f1 * 100:.2f}%",
-            'Significance vs Proposed': sig_text
+            'raw_p': p_mcnemar
         })
 
         print(f"\n📊 {model_name} Overall 5-Fold Acc: {overall_acc:.2f}% | F1: {f1 * 100:.2f}%\n")
 
-        # Generate Confusion Matrix and ROC Curve
         plot_model_confusion_matrix(all_labels, all_preds, model_name)
         plot_model_roc_curve(all_labels, all_probs, model_name)
+
+    # Apply Holm-Bonferroni Family-Wise Error Rate Correction across the 4 baselines
+    adj_p_values = holm_bonferroni_correction(mcnemar_raw_p)
+    for i, b_eval in enumerate(baseline_evals):
+        adj_p = adj_p_values[i]
+        if adj_p < 0.001:
+            sig_text = f"McNemar p < 0.001 (Sig, Holm-adj)"
+        elif adj_p < 0.05:
+            sig_text = f"McNemar p = {adj_p:.4f} (Sig, Holm-adj)"
+        else:
+            sig_text = f"McNemar p = {adj_p:.4f} (NS, Holm-adj)"
+        b_eval['Significance vs Proposed'] = sig_text
+        del b_eval['raw_p']
+        master_table.append(b_eval)
 
     # Append Proposed NeuroGAT
     mean_gnn_acc = np.mean(gnn_fold_accs) * 100

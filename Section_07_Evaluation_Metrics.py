@@ -508,8 +508,12 @@ def compute_bootstrap_ci(
     boot_accs = []
     boot_macro_f1 = []
     boot_weighted_f1 = []
+    boot_macro_auc = []
     class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
-    boot_class_metrics = {c: {'precision': [], 'recall': [], 'f1': []} for c in class_names}
+    boot_class_metrics = {c: {'precision': [], 'recall': [], 'f1': [], 'auc': []} for c in class_names}
+
+    has_probs = all_probs is not None and len(all_probs) == n_samples
+    from sklearn.metrics import roc_auc_score
 
     for _ in range(n_bootstraps):
         indices = np.random.choice(n_samples, n_samples, replace=True)
@@ -530,7 +534,26 @@ def compute_bootstrap_ci(
             boot_class_metrics[c]['recall'].append(r_cls[idx])
             boot_class_metrics[c]['f1'].append(f_cls[idx])
 
+        if has_probs:
+            b_prob = all_probs[indices]
+            if len(np.unique(b_true)) == len(class_names):
+                try:
+                    m_auc = roc_auc_score(b_true, b_prob, multi_class='ovr', average='macro')
+                    boot_macro_auc.append(m_auc)
+                except Exception:
+                    pass
+            for idx, c in enumerate(class_names):
+                b_bin = (b_true == idx).astype(int)
+                if len(np.unique(b_bin)) == 2:
+                    try:
+                        c_auc = roc_auc_score(b_bin, b_prob[:, idx])
+                        boot_class_metrics[c]['auc'].append(c_auc)
+                    except Exception:
+                        pass
+
     def get_ci(arr):
+        if len(arr) == 0:
+            return 0.0, 0.0, 0.0
         low = np.percentile(arr, alpha * 100)
         high = np.percentile(arr, (1.0 - alpha) * 100)
         mean = float(np.mean(arr))
@@ -540,29 +563,37 @@ def compute_bootstrap_ci(
         'accuracy': get_ci(boot_accs),
         'macro_f1': get_ci(boot_macro_f1),
         'weighted_f1': get_ci(boot_weighted_f1),
+        'macro_auc': get_ci(boot_macro_auc) if len(boot_macro_auc) > 10 else (0.0, 0.0, 0.0),
         'classes': {}
     }
 
     print(f"   • Overall Accuracy : {ci_results['accuracy'][0]*100:.2f}% [95% CI: {ci_results['accuracy'][1]*100:.2f}% - {ci_results['accuracy'][2]*100:.2f}%]")
     print(f"   • Macro Avg F1     : {ci_results['macro_f1'][0]*100:.2f}% [95% CI: {ci_results['macro_f1'][1]*100:.2f}% - {ci_results['macro_f1'][2]*100:.2f}%]")
     print(f"   • Weighted Avg F1  : {ci_results['weighted_f1'][0]*100:.2f}% [95% CI: {ci_results['weighted_f1'][1]*100:.2f}% - {ci_results['weighted_f1'][2]*100:.2f}%]")
+    if ci_results['macro_auc'][0] > 0:
+        print(f"   • Macro Avg AUROC  : {ci_results['macro_auc'][0]*100:.2f}% [95% CI: {ci_results['macro_auc'][1]*100:.2f}% - {ci_results['macro_auc'][2]*100:.2f}%]")
 
     for c in class_names:
         p_ci = get_ci(boot_class_metrics[c]['precision'])
         r_ci = get_ci(boot_class_metrics[c]['recall'])
         f_ci = get_ci(boot_class_metrics[c]['f1'])
-        ci_results['classes'][c] = {'precision': p_ci, 'recall': r_ci, 'f1': f_ci}
-        print(f"   • {c:<4} F1: {f_ci[0]*100:.2f}% [{f_ci[1]*100:.2f}% - {f_ci[2]*100:.2f}%] | Recall: {r_ci[0]*100:.2f}% [{r_ci[1]*100:.2f}% - {r_ci[2]*100:.2f}%]")
+        a_ci = get_ci(boot_class_metrics[c]['auc'])
+        ci_results['classes'][c] = {'precision': p_ci, 'recall': r_ci, 'f1': f_ci, 'auc': a_ci}
+        auc_str = f" | AUROC: {a_ci[0]*100:.2f}% [{a_ci[1]*100:.2f}% - {a_ci[2]*100:.2f}%]" if a_ci[0] > 0 else ""
+        print(f"   • {c:<4} F1: {f_ci[0]*100:.2f}% [{f_ci[1]*100:.2f}% - {f_ci[2]*100:.2f}%] | Recall: {r_ci[0]*100:.2f}% [{r_ci[1]*100:.2f}% - {r_ci[2]*100:.2f}%]{auc_str}")
 
     # Save CSV
     ci_rows = []
     for c in class_names:
-        ci_rows.append({
+        row_dict = {
             'Class': c,
             'Precision': f"{ci_results['classes'][c]['precision'][0]*100:.2f}% [{ci_results['classes'][c]['precision'][1]*100:.2f}%, {ci_results['classes'][c]['precision'][2]*100:.2f}%]",
             'Recall': f"{ci_results['classes'][c]['recall'][0]*100:.2f}% [{ci_results['classes'][c]['recall'][1]*100:.2f}%, {ci_results['classes'][c]['recall'][2]*100:.2f}%]",
             'F1-Score': f"{ci_results['classes'][c]['f1'][0]*100:.2f}% [{ci_results['classes'][c]['f1'][1]*100:.2f}%, {ci_results['classes'][c]['f1'][2]*100:.2f}%]",
-        })
+        }
+        if ci_results['classes'][c]['auc'][0] > 0:
+            row_dict['AUROC'] = f"{ci_results['classes'][c]['auc'][0]*100:.2f}% [{ci_results['classes'][c]['auc'][1]*100:.2f}%, {ci_results['classes'][c]['auc'][2]*100:.2f}%]"
+        ci_rows.append(row_dict)
     df_ci = pd.DataFrame(ci_rows)
     df_ci.to_csv(os.path.join(Config.OUTPUT_DIR, 'metrics_95_ci.csv'), index=False)
     return ci_results
@@ -921,36 +952,74 @@ def audit_demographic_fairness(
 def export_evaluation_to_latex(ci_results: Dict[str, Any], df_report: pd.DataFrame, output_dir: str, all_labels: np.ndarray):
     """Exports camera-ready booktabs LaTeX table for IEEE/Springer papers."""
     table_path = os.path.join(output_dir, 'table_evaluation_metrics_ci.tex')
-    lines = [
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\small",
-        r"\caption{NeuroGAT 5-Fold Cross-Validation Diagnostic Performance with 95\% Non-Parametric Bootstrap Confidence Intervals ($B=1,000$).}",
-        r"\label{tab:neurogat_metrics_ci}",
-        r"\begin{tabular}{lcccc}",
-        r"\toprule",
-        r"\textbf{Diagnostic Class} & \textbf{Precision [95\% CI]} & \textbf{Recall / Sensitivity [95\% CI]} & \textbf{F1-Score [95\% CI]} & \textbf{Support} \\",
-        r"\midrule"
-    ]
-    class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
-    for c in class_names:
-        p_m, p_l, p_h = ci_results['classes'][c]['precision']
-        r_m, r_l, r_h = ci_results['classes'][c]['recall']
-        f_m, f_l, f_h = ci_results['classes'][c]['f1']
-        supp = int(df_report.loc[c, 'support']) if c in df_report.index else 0
-        p_str = f"{p_m*100:.1f} [{p_l*100:.1f}, {p_h*100:.1f}]"
-        r_str = f"{r_m*100:.1f} [{r_l*100:.1f}, {r_h*100:.1f}]"
-        f_str = f"{f_m*100:.1f} [{f_l*100:.1f}, {f_h*100:.1f}]"
-        lines.append(f"{c} & {p_str} & {r_str} & {f_str} & {supp:,} \\\\")
+    has_auc = 'macro_auc' in ci_results and ci_results['macro_auc'][0] > 0
 
-    lines.append(r"\midrule")
-    acc_m, acc_l, acc_h = ci_results['accuracy']
-    mf1_m, mf1_l, mf1_h = ci_results['macro_f1']
-    lines.append(r"\textbf{Overall Accuracy} & \multicolumn{3}{c}{\textbf{" + f"{acc_m*100:.2f}\\% [{acc_l*100:.2f}\\%, {acc_h*100:.2f}\\%]" + r"}} & " + f"{len(all_labels):,}" + r" \\")
-    lines.append(r"\textbf{Macro Average F1} & \multicolumn{3}{c}{\textbf{" + f"{mf1_m*100:.2f}\\% [{mf1_l*100:.2f}\\%, {mf1_h*100:.2f}\\%]" + r"}} & - \\")
-    lines.append(r"\bottomrule")
-    lines.append(r"\end{tabular}")
-    lines.append(r"\end{table}")
+    if has_auc:
+        lines = [
+            r"\begin{table}[htbp]",
+            r"\centering",
+            r"\small",
+            r"\caption{NeuroGAT 5-Fold Cross-Validation Diagnostic Performance with 95\% Non-Parametric Bootstrap Confidence Intervals ($B=1,000$).}",
+            r"\label{tab:neurogat_metrics_ci}",
+            r"\begin{tabular}{lccccc}",
+            r"\toprule",
+            r"\textbf{Diagnostic Class} & \textbf{Precision [95\% CI]} & \textbf{Recall / Sensitivity [95\% CI]} & \textbf{F1-Score [95\% CI]} & \textbf{AUROC [95\% CI]} & \textbf{Support} \\",
+            r"\midrule"
+        ]
+        class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
+        for c in class_names:
+            p_m, p_l, p_h = ci_results['classes'][c]['precision']
+            r_m, r_l, r_h = ci_results['classes'][c]['recall']
+            f_m, f_l, f_h = ci_results['classes'][c]['f1']
+            a_m, a_l, a_h = ci_results['classes'][c].get('auc', (0.0, 0.0, 0.0))
+            supp = int(df_report.loc[c, 'support']) if c in df_report.index else 0
+            p_str = f"{p_m*100:.1f} [{p_l*100:.1f}, {p_h*100:.1f}]"
+            r_str = f"{r_m*100:.1f} [{r_l*100:.1f}, {r_h*100:.1f}]"
+            f_str = f"{f_m*100:.1f} [{f_l*100:.1f}, {f_h*100:.1f}]"
+            a_str = f"{a_m*100:.1f} [{a_l*100:.1f}, {a_h*100:.1f}]"
+            lines.append(f"{c} & {p_str} & {r_str} & {f_str} & {a_str} & {supp:,} \\\\")
+
+        lines.append(r"\midrule")
+        acc_m, acc_l, acc_h = ci_results['accuracy']
+        mf1_m, mf1_l, mf1_h = ci_results['macro_f1']
+        mauc_m, mauc_l, mauc_h = ci_results['macro_auc']
+        lines.append(r"\textbf{Overall Accuracy} & \multicolumn{4}{c}{\textbf{" + f"{acc_m*100:.2f}\\% [{acc_l*100:.2f}\\%, {acc_h*100:.2f}\\%]" + r"}} & " + f"{len(all_labels):,}" + r" \\")
+        lines.append(r"\textbf{Macro Average F1} & \multicolumn{4}{c}{\textbf{" + f"{mf1_m*100:.2f}\\% [{mf1_l*100:.2f}\\%, {mf1_h*100:.2f}\\%]" + r"}} & - \\")
+        lines.append(r"\textbf{Macro Average AUROC} & \multicolumn{4}{c}{\textbf{" + f"{mauc_m*100:.2f}\\% [{mauc_l*100:.2f}\\%, {mauc_h*100:.2f}\\%]" + r"}} & - \\")
+        lines.append(r"\bottomrule")
+        lines.append(r"\end{tabular}")
+        lines.append(r"\end{table}")
+    else:
+        lines = [
+            r"\begin{table}[htbp]",
+            r"\centering",
+            r"\small",
+            r"\caption{NeuroGAT 5-Fold Cross-Validation Diagnostic Performance with 95\% Non-Parametric Bootstrap Confidence Intervals ($B=1,000$).}",
+            r"\label{tab:neurogat_metrics_ci}",
+            r"\begin{tabular}{lcccc}",
+            r"\toprule",
+            r"\textbf{Diagnostic Class} & \textbf{Precision [95\% CI]} & \textbf{Recall / Sensitivity [95\% CI]} & \textbf{F1-Score [95\% CI]} & \textbf{Support} \\",
+            r"\midrule"
+        ]
+        class_names = getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])
+        for c in class_names:
+            p_m, p_l, p_h = ci_results['classes'][c]['precision']
+            r_m, r_l, r_h = ci_results['classes'][c]['recall']
+            f_m, f_l, f_h = ci_results['classes'][c]['f1']
+            supp = int(df_report.loc[c, 'support']) if c in df_report.index else 0
+            p_str = f"{p_m*100:.1f} [{p_l*100:.1f}, {p_h*100:.1f}]"
+            r_str = f"{r_m*100:.1f} [{r_l*100:.1f}, {r_h*100:.1f}]"
+            f_str = f"{f_m*100:.1f} [{f_l*100:.1f}, {f_h*100:.1f}]"
+            lines.append(f"{c} & {p_str} & {r_str} & {f_str} & {supp:,} \\\\")
+
+        lines.append(r"\midrule")
+        acc_m, acc_l, acc_h = ci_results['accuracy']
+        mf1_m, mf1_l, mf1_h = ci_results['macro_f1']
+        lines.append(r"\textbf{Overall Accuracy} & \multicolumn{3}{c}{\textbf{" + f"{acc_m*100:.2f}\\% [{acc_l*100:.2f}\\%, {acc_h*100:.2f}\\%]" + r"}} & " + f"{len(all_labels):,}" + r" \\")
+        lines.append(r"\textbf{Macro Average F1} & \multicolumn{3}{c}{\textbf{" + f"{mf1_m*100:.2f}\\% [{mf1_l*100:.2f}\\%, {mf1_h*100:.2f}\\%]" + r"}} & - \\")
+        lines.append(r"\bottomrule")
+        lines.append(r"\end{tabular}")
+        lines.append(r"\end{table}")
 
     with open(table_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

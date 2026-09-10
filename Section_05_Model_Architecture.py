@@ -107,7 +107,10 @@ def build_multiscale_population_graph(
     else:
         features_norm = scaler.fit_transform(features)
 
-    # 4. Multi-Scale Affinity Graph Construction
+    # 4. Multi-Scale Affinity Graph Construction (Strict Unsupervised Phenotypic Manifold)
+    # Zero Leakage Guard: Edges are computed purely from unsupervised cosine feature distances.
+    # Diagnostic labels and MMSE cognitive scores NEVER participate in graph topology construction.
+    print("🛡️  Topology Guard: Constructing edges purely from unsupervised feature affinity (Zero Label / Cognitive Score Leakage).")
     max_k = max(k_list)
     knn = NearestNeighbors(n_neighbors=max_k + 1, metric='cosine')
     knn.fit(features_norm)
@@ -141,11 +144,14 @@ def build_multiscale_population_graph(
     edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
     edge_weight = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)  # Shape: (E, 1)
     x = torch.tensor(features_norm, dtype=torch.float32)
-    y = torch.tensor(labels, dtype=torch.long)
 
-    graph_data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight, y=y)
+    graph_data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight)
 
-    # Store continuous cognitive score if provided
+    # Attach diagnostic labels strictly as downstream supervised training target
+    if labels is not None:
+        graph_data.y = torch.tensor(labels, dtype=torch.long)
+
+    # Attach continuous cognitive scores strictly as auxiliary multi-task regression target
     if cognitive_scores is not None:
         graph_data.cog_y = torch.tensor(cognitive_scores, dtype=torch.float32).unsqueeze(1)
 

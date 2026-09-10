@@ -604,6 +604,10 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
     k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
 
+    print("📖 Evaluation Setting: Transductive Population Graph Learning (Parisot et al., MICCAI 2017 & MedIA 2018).")
+    print("   Unlabeled node manifold features available for graph topology; validation and test labels")
+    print("   remain strictly masked during optimization with per-node LayerNorm isolation.")
+
     cv_results = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):

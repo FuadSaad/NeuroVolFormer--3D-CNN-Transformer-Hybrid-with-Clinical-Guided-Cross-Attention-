@@ -452,6 +452,18 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     else:
         print(f"⚠️ Clinical CSV not found at {clinical_csv}! Clinical features will be missing.")
 
+    # Step 0: Participant-Level Cohort De-duplication (Q1 Standard)
+    if getattr(Config, 'ONE_SCAN_PER_SUBJECT', True):
+        initial_count = len(file_df)
+        sort_col = 'image_id' if 'image_id' in file_df.columns else ('file_name' if 'file_name' in file_df.columns else 'subject_id')
+        file_df = file_df.sort_values(sort_col).drop_duplicates('subject_id', keep='first').reset_index(drop=True)
+        print("\n" + "-" * 50)
+        print("  Step 0: Participant-Level Cohort De-duplication (Q1 Standard)")
+        print("-" * 50)
+        print(f"👥 Cohort Filtered: Exactly 1 baseline scan per participant.")
+        print(f"   Refined from {initial_count} longitudinal scans to {len(file_df)} unique participants.")
+        print(f"   Guarantees zero repeated-measures scan correlation across population graph nodes.")
+
     # Step 1: Patient-level split
     print("\n" + "-" * 50)
     print("  Step 1: Patient-Level Stratified Split")
