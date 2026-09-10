@@ -248,7 +248,7 @@ class NeuroGATInferenceEngine:
           4. Compute cosine similarity against reference population nodes.
           5. Connect query node to top-k nearest neighbors in the population graph.
           6. Execute GNN multi-task forward pass for 4-class diagnosis, continuous cognitive severity,
-             and 24-month MCI conversion hazard index.
+             and empirical progression vulnerability score.
         """
         patient_vec = self._prepare_patient_feature_vector(clinical_dict, imaging_features)
 
@@ -357,7 +357,7 @@ class NeuroGATInferenceEngine:
             ]
         elif pred_class == 'LMCI':
             return [
-                f"High-vigilance monitoring protocol: scheduled 3-month neuropsychological reassessment (Current Hazard: {risk_score:.1f}%).",
+                f"High-vigilance monitoring protocol: scheduled 3-month neuropsychological reassessment (Progression Vulnerability: {risk_score:.1f}%).",
                 "Evaluate eligibility for disease-modifying early-stage AD clinical trials.",
                 "Conduct volumetric MRI follow-up at 6 months to measure hippocampal atrophy rate.",
                 "Target vascular risk factors: blood pressure (<130 mmHg) and lipid management.",

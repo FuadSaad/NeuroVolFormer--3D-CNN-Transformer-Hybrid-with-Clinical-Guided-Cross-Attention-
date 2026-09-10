@@ -271,9 +271,10 @@ def plot_multiclass_roc(all_labels: np.ndarray, all_probs: np.ndarray):
 
 def plot_mci_risk_distribution(all_labels: np.ndarray, risk_scores: np.ndarray):
     """
-    Plots the distribution of 24-month progression risk scores stratified by diagnostic group.
+    Plots the distribution of empirical disease severity and transition vulnerability scores
+    stratified by diagnostic cohort (Issue 45: empirical staging, not longitudinal hazard).
     """
-    print("📈 Generating 24-Month MCI Conversion Hazard Distribution...")
+    print("📈 Generating MCI Transition Vulnerability Distribution...")
     idx_to_class = getattr(Config, 'IDX_TO_CLASS', {0: 'AD', 1: 'CN', 2: 'EMCI', 3: 'LMCI'})
     class_colors = getattr(Config, 'CLASS_COLORS', {'AD': '#e74c3c', 'CN': '#2ecc71', 'EMCI': '#3498db', 'LMCI': '#e67e22'})
     figures_dir = getattr(Config, 'FIGURES_DIR', '/kaggle/working/outputs/figures')
@@ -281,7 +282,7 @@ def plot_mci_risk_distribution(all_labels: np.ndarray, risk_scores: np.ndarray):
 
     df = pd.DataFrame({
         'Diagnosis': [idx_to_class.get(l, f'Class_{l}') for l in all_labels],
-        'Conversion Hazard (%)': risk_scores
+        'Transition Vulnerability (%)': risk_scores
     })
 
     plt.figure(figsize=(11, 6))
@@ -289,24 +290,24 @@ def plot_mci_risk_distribution(all_labels: np.ndarray, risk_scores: np.ndarray):
     palette = [class_colors.get(c, '#333333') for c in order]
 
     sns.violinplot(
-        x='Diagnosis', y='Conversion Hazard (%)', data=df,
+        x='Diagnosis', y='Transition Vulnerability (%)', data=df,
         order=order, palette=palette, inner='quartile', cut=0
     )
     sns.stripplot(
-        x='Diagnosis', y='Conversion Hazard (%)', data=df,
+        x='Diagnosis', y='Transition Vulnerability (%)', data=df,
         order=order, color='black', alpha=0.2, jitter=0.2, size=3
     )
 
-    plt.axhline(25.0, color='green', linestyle='--', alpha=0.7, label='Low Risk Threshold (25%)')
-    plt.axhline(60.0, color='red', linestyle='--', alpha=0.7, label='High Rapid Conversion Threshold (60%)')
+    plt.axhline(25.0, color='green', linestyle='--', alpha=0.7, label='Low Progression Vulnerability (<25%)')
+    plt.axhline(60.0, color='red', linestyle='--', alpha=0.7, label='Elevated Progression Vulnerability (>60%)')
 
-    plt.title('24-Month Disease Progression Hazard Stratified by Cohort', fontsize=15, fontweight='bold', pad=15)
+    plt.title('Disease Severity & MCI Transition Vulnerability Stratified by Cohort', fontsize=15, fontweight='bold', pad=15)
     plt.xlabel('Diagnostic Subgroup', fontsize=13, fontweight='bold')
-    plt.ylabel('24-Month Conversion Hazard Index (%)', fontsize=13, fontweight='bold')
+    plt.ylabel('Empirical Transition Vulnerability Score (%)', fontsize=13, fontweight='bold')
     plt.legend(loc='upper left', prop={'size': 11, 'weight': 'bold'})
     plt.grid(True, linestyle='--', alpha=0.4)
 
-    plt.savefig(os.path.join(figures_dir, 'mci_conversion_hazard_distribution.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(figures_dir, 'mci_transition_vulnerability_distribution.png'), dpi=300, bbox_inches='tight')
     plt.show()
     plt.close()
 
@@ -524,6 +525,7 @@ def compute_bootstrap_ci(
             if len(c_idx) > 0:
                 boot_idx_list.append(np.random.choice(c_idx, size=len(c_idx), replace=True))
         indices = np.concatenate(boot_idx_list)
+        np.random.shuffle(indices)
         b_true = all_labels[indices]
         b_pred = all_preds[indices]
 
@@ -634,7 +636,13 @@ def compute_clinical_diagnostic_matrix(
         ppv = tp / max(tp + fp, 1)
         npv = tn / max(tn + fn, 1)
         bal_acc = (sens + spec) / 2.0
-        dor = (tp * tn) / max(fp * fn, 1)
+
+        # Haldane-Anscombe correction (Anscombe 1956, Haldane 1955)
+        # Adds 0.5 to all 4 confusion cells if any cell is 0, eliminating division by zero or infinite DOR
+        if tp == 0 or tn == 0 or fp == 0 or fn == 0:
+            dor = ((tp + 0.5) * (tn + 0.5)) / ((fp + 0.5) * (fn + 0.5))
+        else:
+            dor = (tp * tn) / (fp * fn)
 
         rows.append({
             'Diagnostic Class': c_name,

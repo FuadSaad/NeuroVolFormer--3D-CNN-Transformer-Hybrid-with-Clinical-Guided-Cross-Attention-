@@ -470,7 +470,8 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
 
         has_baseline_codes = False
         if viscode_col:
-            is_bl_mask = file_df[viscode_col].astype(str).str.strip().str.lower().isin(['bl', 'sc', 'baseline', 'm00'])
+            # Issue 38: Strictly match genuine baseline visits ('bl', 'baseline', 'm00'); do NOT match screening ('sc')
+            is_bl_mask = file_df[viscode_col].astype(str).str.strip().str.lower().isin(['bl', 'baseline', 'm00'])
             if is_bl_mask.any():
                 has_baseline_codes = True
                 file_df['__is_bl__'] = is_bl_mask

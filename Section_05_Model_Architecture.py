@@ -55,15 +55,14 @@ for _k, _v in _defaults.items():
 def build_multiscale_population_graph(
     features: np.ndarray,
     k_list: List[int] = [3, 5, 10],
-    train_indices: Optional[Union[List[int], np.ndarray]] = None,
-    **kwargs
+    train_indices: Optional[Union[List[int], np.ndarray]] = None
 ) -> Data:
     """
     Constructs an unsupervised Multi-Scale Population Graph (PyG Data) integrating micro-, meso-,
     and macro-scale phenotypic patient manifolds (Parisot et al., MICCAI 2017 & Medical Image Analysis 2018).
 
     Graph topology is generated strictly from unsupervised phenotypic feature affinity.
-    Supervised targets should be assigned downstream:
+    Supervised targets must be assigned downstream by the training engine:
       graph.y = torch.tensor(labels, dtype=torch.long)
       graph.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1)
 
@@ -73,18 +72,10 @@ def build_multiscale_population_graph(
         train_indices: Optional indices of training nodes. When provided, PCA and 
                        StandardScaler are strictly fit on train_indices and then used to 
                        transform validation and test nodes (Zero Distribution Leakage).
-        **kwargs: Optional backward compatibility arguments ('labels', 'cognitive_scores').
 
     Returns:
         torch_geometric.data.Data object containing x, edge_index, and edge_attr.
     """
-    # Backward compatibility handler for legacy positional/keyword invocations
-    labels = kwargs.get('labels', None)
-    if isinstance(k_list, (np.ndarray, list)) and len(k_list) == len(features):
-        labels = k_list
-        k_list = kwargs.get('k_list', [3, 5, 10])
-    cognitive_scores = kwargs.get('cognitive_scores', None)
-
     print(f"🔗 Building Multi-Scale Population Graph (Scales K={k_list}) for {features.shape[0]} nodes...")
 
     # 1. Clean NaN / Inf values
@@ -155,22 +146,13 @@ def build_multiscale_population_graph(
     x = torch.tensor(features_norm, dtype=torch.float32)
 
     graph_data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight)
-
-    # Attach diagnostic labels strictly as downstream supervised training target
-    if labels is not None:
-        graph_data.y = torch.tensor(labels, dtype=torch.long)
-
-    # Attach continuous cognitive scores strictly as auxiliary multi-task regression target
-    if cognitive_scores is not None:
-        graph_data.cog_y = torch.tensor(cognitive_scores, dtype=torch.float32).unsqueeze(1)
-
     print(f"✅ Multi-Scale Graph constructed: {graph_data.num_nodes} nodes, {graph_data.num_edges} edges.")
     return graph_data
 
 
-def build_population_graph(features: np.ndarray, k: int = 5, train_indices: Optional[Any] = None, **kwargs) -> Data:
+def build_population_graph(features: np.ndarray, k: int = 5, train_indices: Optional[Any] = None) -> Data:
     """Backward-compatible wrapper defaulting to multi-scale population graph."""
-    return build_multiscale_population_graph(features, k_list=[3, k, 10], train_indices=train_indices, **kwargs)
+    return build_multiscale_population_graph(features, k_list=[3, k, 10], train_indices=train_indices)
 
 
 

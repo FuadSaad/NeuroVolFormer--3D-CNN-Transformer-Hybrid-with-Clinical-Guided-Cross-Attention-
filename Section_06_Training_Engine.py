@@ -203,7 +203,7 @@ def apply_dropedge(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 6.2 24-Month MCI Conversion Prognosis Risk Trajectory
+# 6.2 Empirical Disease Progression & Transition Vulnerability Score
 # ═══════════════════════════════════════════════════════════════════
 
 def compute_mci_conversion_risk(
@@ -211,22 +211,24 @@ def compute_mci_conversion_risk(
     cognitive_scores: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, List[str]]:
     """
-    Computes a calibrated 24-Month Mild Cognitive Impairment (MCI) to Alzheimer's Disease (AD)
-    conversion hazard index for clinical prognosis.
+    Computes an empirical Disease Progression & MCI Transition Vulnerability Score
+    derived from model posterior probabilities and continuous cognitive deficit.
 
-    Class mapping: 0: AD, 1: CN, 2: EMCI, 3: LMCI
+    Note on Scientific Terminology (Issue 45):
+      This is an empirical disease severity staging index derived from cross-sectional model posteriors,
+      NOT a longitudinal time-to-event survival hazard (which requires follow-up tracking and survival loss).
 
-    Clinical Formula:
-        Hazard Index H = 0.50 * P(LMCI) + 0.35 * P(AD) + 0.15 * (P(LMCI) / (P(EMCI) + P(LMCI) + 1e-6))
-        If cognitive severity (e.g. normalized MMSE deficit) is provided, it modulates the hazard:
-        Risk = H * (0.8 + 0.4 * cog_severity) scaled to [0, 100]%
+    Formula:
+        Vulnerability Index V = 0.50 * P(LMCI) + 0.35 * P(AD) + 0.15 * (P(LMCI) / (P(EMCI) + P(LMCI) + 1e-6))
+        If cognitive severity (normalized MMSE deficit) is provided, it modulates the score:
+        Risk = V * (0.8 + 0.4 * cog_severity) scaled to [0, 100]%
 
     Returns:
         risk_percentages: (N,) array of risk scores in [0, 100]%
         risk_categories: List of clinical risk classifications:
-                         - 'Low Conversion Risk (<25%)'
-                         - 'Moderate Conversion Risk (25-60%)'
-                         - 'High Rapid Conversion Risk (>60%)'
+                         - 'Low Progression Risk (<25%)'
+                         - 'Moderate Progression Risk (25-60%)'
+                         - 'High Progression Risk (>60%)'
     """
     probs = np.asarray(probs)
     p_ad = probs[:, 0]
@@ -620,8 +622,8 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
 
     print("📖 Evaluation Setting: Transductive Population Graph Learning (Parisot et al., MICCAI 2017 & MedIA 2018).")
-    print("   Unlabeled node manifold features available for graph topology; validation and test labels")
-    print("   remain strictly masked during optimization with per-node LayerNorm isolation.")
+    print("   Transductive setting: unlabeled validation and test node features are available during graph")
+    print("   construction for population manifold geometry, but all labels remain strictly masked during training and optimization.")
 
     cv_results = []
 
