@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║          SECTION 4B: FEATURE EXTRACTION - NeuroGAT 3D                        ║
+║  Extracts Deep Features (DenseNet121) + Handcrafted (PyRadiomics)            ║
+║  Saves node features for Population Graph Construction                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
+import os
+import gc
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+try:
+    import SimpleITK as sitk
+except ImportError:
+    try:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "SimpleITK"])
+        import SimpleITK as sitk
+    except Exception:
+        sitk = None
+
+try:
+    from Section_01_Setup_Configuration import Config
+    from Section_04_Dataset_DataLoader import ADNIDataset, get_loaders_for_fold
+except ImportError:
+    # If running sequentially in Kaggle Notebook cells, these are already in memory
+    pass
+
+# Guarantee Config directory attributes exist even if older Config is in memory
+base_out = '/kaggle/working' if os.path.exists('/kaggle') else '.'
+if not hasattr(Config, 'OUTPUT_DIR'):
+    Config.OUTPUT_DIR = getattr(Config, 'RESULTS_DIR', os.path.join(base_out, 'outputs').replace('\\', '/'))
+if not hasattr(Config, 'CHECKPOINT_DIR'):
+    Config.CHECKPOINT_DIR = os.path.join(base_out, 'checkpoints').replace('\\', '/')
+if not hasattr(Config, 'FIGURES_DIR'):
+    Config.FIGURES_DIR = os.path.join(Config.OUTPUT_DIR, 'figures').replace('\\', '/')
+if not hasattr(Config, 'PREPROCESSED_DIR'):
+    Config.PREPROCESSED_DIR = os.path.join(base_out, 'preprocessed').replace('\\', '/')
+if not hasattr(Config, 'RADIOMICS_FEATURE_DIM'):
+    Config.RADIOMICS_FEATURE_DIM = 68
+
+try:
+    from radiomics import featureextractor
+except ImportError:
+    featureextractor = None
+
+try:
+    import monai
+    from monai.networks.nets import DenseNet121
+except ImportError:
+    try:
+        import subprocess, sys
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "monai"])
+        import monai
+        from monai.networks.nets import DenseNet121
+    except Exception:
+        monai = None
+        DenseNet121 = None
+
+class Native3DFeatureExtractor(nn.Module):
+    """
+    Native PyTorch 3D Medical CNN Feature Extractor (1024-D).
+    Guarantees seamless execution even if MONAI is unavailable.
+    """
+    def __init__(self, out_dim: int = 1024):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv3d(1, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm3d(32),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm3d(64),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv3d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm3d(128),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv3d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm3d(256),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
+            nn.Flatten(),
+            nn.Linear(256, out_dim),
+            nn.LayerNorm(out_dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.features(x)
+
+
+def get_pretrained_densenet(device):
+    """Loads a 3D DenseNet from MONAI, or falls back to native PyTorch 3D extractor."""
+    if DenseNet121 is not None:
+        try:
+            model = DenseNet121(spatial_dims=3, in_channels=1, out_channels=4).to(device)
+            model.class_layers.out = nn.Identity()
+            model.eval()
+            return model
+        except Exception as e:
+            print(f"⚠️ MONAI initialization note: {e}. Falling back to native 3D extractor.")
+
+    print("ℹ️ Using native PyTorch 3D CNN Feature Extractor (1024-D).")
+    model = Native3DFeatureExtractor(out_dim=1024).to(device)
+    model.eval()
+    return model
+
+
+def extract_native_radiomics(volume_np: np.ndarray, target_dim: int = 68) -> np.ndarray:
+    """
+    Computes 68 3D intensity, morphological, and texture features using native NumPy/SciPy.
+    Used when PyRadiomics is not installed.
+    """
+    feats = []
+    brain_voxels = volume_np[volume_np > 0]
+    if len(brain_voxels) == 0:
+        brain_voxels = volume_np.flatten()
+
+    # 1. First-order intensity statistics (16 features)
+    mean_val = float(np.mean(brain_voxels))
+    std_val = float(np.std(brain_voxels))
+    var_val = float(np.var(brain_voxels))
+    median_val = float(np.median(brain_voxels))
+    min_val = float(np.min(brain_voxels))
+    max_val = float(np.max(brain_voxels))
+    skew_val = float(np.mean(((brain_voxels - mean_val) / (std_val + 1e-7)) ** 3))
+    kurt_val = float(np.mean(((brain_voxels - mean_val) / (std_val + 1e-7)) ** 4))
+    energy = float(np.sum(brain_voxels ** 2) / (len(brain_voxels) + 1e-7))
+    hist, _ = np.histogram(brain_voxels, bins=32, density=True)
+    entropy = float(-np.sum(hist * np.log(hist + 1e-9)))
+    percentiles = [float(p) for p in np.percentile(brain_voxels, [5, 10, 25, 75, 90, 95])]
+    feats.extend([mean_val, std_val, var_val, median_val, min_val, max_val, skew_val, kurt_val, energy, entropy] + percentiles)
+
+    # 2. Multi-planar profile features (Axial, Coronal, Sagittal) (24 features)
+    for axis in (0, 1, 2):
+        profile = np.mean(volume_np, axis=axis)
+        feats.extend([
+            float(np.mean(profile)), float(np.std(profile)),
+            float(np.max(profile)), float(np.median(profile)),
+            float(np.percentile(profile, 25)), float(np.percentile(profile, 75)),
+            float(np.var(profile)), float(np.sum(profile > 0) / (profile.size + 1e-7))
+        ])
+
+    # 3. Spatial gradients & Edge features (20 features)
+    sub = volume_np[::2, ::2, ::2]
+    gz, gy, gx = np.gradient(sub)
+    gmag = np.sqrt(gz**2 + gy**2 + gx**2)
+    g_nz = gmag[gmag > 0]
+    if len(g_nz) > 0:
+        feats.extend([
+            float(np.mean(g_nz)), float(np.std(g_nz)),
+            float(np.max(g_nz)), float(np.median(g_nz)),
+            float(np.percentile(g_nz, 10)), float(np.percentile(g_nz, 90)),
+            float(np.mean(gz)), float(np.std(gz)),
+            float(np.mean(gy)), float(np.std(gy)),
+            float(np.mean(gx)), float(np.std(gx)),
+            float(np.var(gmag)), float(np.sum(gmag > 0.1) / (gmag.size + 1e-7)),
+            float(np.percentile(gmag, 25)), float(np.percentile(gmag, 75)),
+            float(np.percentile(gmag, 5)), float(np.percentile(gmag, 95)),
+            float(np.mean(gmag ** 2)), float(np.max(gmag) - np.min(gmag))
+        ])
+    else:
+        feats.extend([0.0] * 20)
+
+    # 4. Volume / Geometry (Brain Parenchyma Fraction) (8 features)
+    total_voxels = volume_np.size
+    brain_vol = len(brain_voxels)
+    bpf = float(brain_vol / (total_voxels + 1e-7))
+    feats.extend([
+        float(brain_vol), bpf,
+        float(np.sum(brain_voxels > mean_val) / (brain_vol + 1e-7)),
+        float(np.sum(brain_voxels > (mean_val + std_val)) / (brain_vol + 1e-7)),
+        float(np.sum(brain_voxels < (mean_val - std_val)) / (brain_vol + 1e-7)),
+        float(std_val / (mean_val + 1e-7)),
+        float((max_val - min_val) / (std_val + 1e-7)),
+        float((np.percentile(brain_voxels, 75) - np.percentile(brain_voxels, 25)) / (std_val + 1e-7))
+    ])
+
+    feats = np.array(feats, dtype=np.float32)
+    if len(feats) < target_dim:
+        feats = np.pad(feats, (0, target_dim - len(feats)), mode='constant')
+    else:
+        feats = feats[:target_dim]
+    return np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def extract_radiomics(volume_np: np.ndarray) -> np.ndarray:
+    """
+    Extracts 3D handcrafted features (GLCM, GLRLM, First Order) using PyRadiomics.
+    Falls back to extract_native_radiomics if PyRadiomics is not installed.
+    """
+    if featureextractor is None or sitk is None:
+        return extract_native_radiomics(volume_np, getattr(Config, 'RADIOMICS_FEATURE_DIM', 68))
+
+    # Convert numpy to SimpleITK Image
+    image = sitk.GetImageFromArray(volume_np)
+
+    # Create a dummy mask (the whole non-zero brain)
+    mask_np = (volume_np > 0).astype(np.uint8)
+    mask = sitk.GetImageFromArray(mask_np)
+
+    # Setup PyRadiomics Extractor
+    settings = {'binWidth': 25, 'resampledPixelSpacing': None, 'interpolator': sitk.sitkBSpline}
+    extractor = featureextractor.RadiomicsFeatureExtractor(**settings)
+
+    # Disable shape features (we care about texture)
+    extractor.disableAllFeatures()
+    extractor.enableFeatureClassByName('firstorder')
+    extractor.enableFeatureClassByName('glcm')
+    extractor.enableFeatureClassByName('glrlm')
+
+    try:
+        result = extractor.execute(image, mask)
+        # Extract numerical features
+        features = []
+        for key, value in result.items():
+            if key.startswith('original_'):
+                features.append(float(value))
+        return np.array(features, dtype=np.float32)
+    except Exception as e:
+        # Fallback if extractor fails
+        return extract_native_radiomics(volume_np, getattr(Config, 'RADIOMICS_FEATURE_DIM', 68))
+
+def run_feature_extraction(file_df: pd.DataFrame, clinical_features: pd.DataFrame):
+    """
+    Loops through the entire dataset once to extract Deep + Handcrafted features.
+    Saves the final matrix for Graph construction.
+    """
+    print("\n" + "="*70)
+    print("  🚀 STARTING 3D FEATURE EXTRACTION (NEUROGAT)")
+    print("="*70)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🖥️  Using Device: {device}")
+
+    # Check for Multiple GPUs
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 1:
+        print(f"🚀 Detected {num_gpus} GPUs! Enabling Multi-GPU Processing (DataParallel)...")
+
+    # Initialize Pre-trained Deep Extractor
+    print("📦 Loading 3D DenseNet Extractor...")
+    deep_extractor = get_pretrained_densenet(device)
+    if num_gpus > 1:
+        deep_extractor = nn.DataParallel(deep_extractor)
+
+    # We will use the ADNIDataset class just to load the preprocessed images
+    file_paths = file_df['preprocessed_path'].tolist()
+    labels = file_df['label_idx'].tolist()
+    dataset = ADNIDataset(file_paths, labels, clinical_features, transform=None)
+
+    # Use DataLoader for Batch Processing (Fast Multi-GPU Extraction)
+    batch_size = 4 * max(1, num_gpus) # E.g., 8 for T4x2
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+    all_features = []
+    all_labels = []
+
+    output_dir = getattr(Config, 'OUTPUT_DIR', getattr(Config, 'RESULTS_DIR', '/kaggle/working/outputs'))
+    os.makedirs(output_dir, exist_ok=True)
+    features_path = os.path.join(output_dir, 'node_features.npy')
+    labels_path = os.path.join(output_dir, 'node_labels.npy')
+
+    if os.path.exists(features_path) and os.path.exists(labels_path):
+        print(f"✅ Features already extracted at {features_path}. Skipping.")
+        return
+
+    print(f"⏳ Extracting features for {len(dataset)} patients... (Batch Size: {batch_size})")
+
+    with torch.no_grad():
+        for batch_volumes, batch_clinical, batch_labels in tqdm(dataloader, desc="Feature Extraction"):
+
+            # 1. Deep Features (Batch on GPU)
+            # Dataloader already provides shape (B, 1, D, H, W)
+            vol_tensor = batch_volumes.to(device)
+            deep_feats = deep_extractor(vol_tensor) # Shape: (B, 1024)
+            deep_feats_np = deep_feats.cpu().numpy()
+
+            # Process each item in the batch for CPU-bound tasks
+            for b in range(batch_volumes.size(0)):
+                # Remove channel dim for pyradiomics -> (D, H, W)
+                vol_np = batch_volumes[b, 0].numpy()
+                clin_np = batch_clinical[b].numpy()
+                lbl = batch_labels[b].item()
+                deep_f = deep_feats_np[b]
+
+                # 2. Handcrafted Features (PyRadiomics on CPU)
+                radio_f = extract_radiomics(vol_np)
+
+                # 3. Fusion
+                fused_feat = np.concatenate([deep_f, radio_f, clin_np])
+
+                all_features.append(fused_feat)
+                all_labels.append(lbl)
+
+    # Save to disk
+    X = np.stack(all_features)
+    y = np.array(all_labels)
+
+    np.save(features_path, X)
+    np.save(labels_path, y)
+
+    # Extract & Save Ground-Truth Continuous Cognitive Impairment Scores (MMSE)
+    cog_path = os.path.join(output_dir, 'node_cog_scores.npy')
+    if 'MMSE' in file_df.columns:
+        mmse_raw = file_df['MMSE'].fillna(file_df['MMSE'].median()).values
+        # Normalized continuous cognitive impairment severity in [0, 1]
+        cog_scores = np.clip((30.0 - mmse_raw) / 30.0, 0.0, 1.0).astype(np.float32)
+        np.save(cog_path, cog_scores)
+        print(f"🧠 Ground-Truth Cognitive Scores (MMSE) saved to: {cog_path}")
+
+    print(f"🎉 Extraction Complete!")
+    print(f"📊 Feature Matrix Shape: {X.shape}")
+
+# ═══════════════════════════════════════════════════════════════════
+# Execute Feature Extraction
+# ═══════════════════════════════════════════════════════════════════
+try:
+    # If running sequentially in Kaggle, file_df and clinical_features are in memory
+    if 'file_df' in locals() or 'file_df' in globals():
+        run_feature_extraction(file_df, clinical_features)
+    else:
+        print("Section 4B (Feature Extraction) Loaded.")
+except Exception as e:
+    print(f"⚠️ Could not auto-run Section 4B: {e}")

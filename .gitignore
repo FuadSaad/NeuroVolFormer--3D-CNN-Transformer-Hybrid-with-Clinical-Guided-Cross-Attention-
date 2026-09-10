@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Checkpoints and Large Binaries (>50MB)
+checkpoints/
+*.pt
+*.pth
+*.npy
+*.npz
+
+# Raw / Preprocessed Large Neuroimaging Volumes
+preprocessed/
+*.nii
+*.nii.gz
+
+# Outputs (temporary logs and cache, preserve figures and tables)
+outputs/*.npy
+outputs/*.npz
+outputs/*.pt
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Virtual Environments
+venv/
+.env/
+env/
+
+# OS Specific
+.DS_Store
+Thumbs.db
