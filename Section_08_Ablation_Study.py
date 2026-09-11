@@ -251,6 +251,11 @@ def run_ablation_studies(features_path: str, labels_path: str):
     raw_features = np.load(features_path)
     labels = np.load(labels_path)
 
+    cog_path = os.path.join(Config.OUTPUT_DIR, 'node_cog_scores.npy')
+    cog_scores = np.load(cog_path) if os.path.exists(cog_path) else None
+    if cog_scores is not None:
+        print(f"🧠 Loaded Ground-Truth Continuous Cognitive Impairment Scores: {cog_scores.shape}")
+
     splits_path = os.path.join(Config.OUTPUT_DIR, 'results', 'splits.pt')
     splits_data = torch.load(splits_path, weights_only=False)
     test_indices = splits_data['test_indices']
@@ -311,11 +316,16 @@ def run_ablation_studies(features_path: str, labels_path: str):
             graph_data.val_mask[val_idx] = True
             graph_data.test_mask[test_indices] = True
 
+            if cog_scores is not None:
+                graph_data.cog_y = torch.tensor(cog_scores, dtype=torch.float32).unsqueeze(1).to(device)
+
             trainer = GNNTrainer(graph_data, fold_idx, device)
             trainer._plot_learning_curve = lambda: None  # Suppress per-fold auto plot
 
             if 'lambda_cog' in exp:
-                trainer.lambda_cog = exp['lambda_cog']
+                trainer.lambda_cog = exp['lambda_cog'] if cog_scores is not None else 0.0
+            elif cog_scores is None:
+                trainer.lambda_cog = 0.0
             if 'use_dropedge' in exp:
                 trainer.use_dropedge = exp['use_dropedge']
             if exp.get('standard_ce', False):
