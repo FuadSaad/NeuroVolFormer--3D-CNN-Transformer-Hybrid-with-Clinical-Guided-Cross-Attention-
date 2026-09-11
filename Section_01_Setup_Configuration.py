@@ -383,7 +383,7 @@ class Config:
     FIGURES_DIR = os.path.join(BASE_OUTPUT, 'outputs/figures').replace('\\', '/')
 
     # ── Pipeline Execution & Clean-Slate Control ──
-    CLEAN_OUTPUTS_ON_START = False         # Manual/flag control to prevent accidental data purge
+    CLEAN_OUTPUTS_ON_START = True          # Auto-clean previous run artifacts on start
     PRESERVE_EXTRACTED_FEATURES = True     # True: preserve node_features.npy, node_labels.npy, splits.pt (~3h runtime saved)
                                            # False: full nuclear purge of all preprocessed data as well
 
@@ -501,8 +501,8 @@ def clean_previous_run_artifacts(preserve_extracted_features: bool = True) -> No
         except Exception as e:
             print(f"  ⚠️ Could not remove {Config.FIGURES_DIR}: {e}")
 
-    # 4. Outputs subdirectories: xai, models, results
-    for sub in ['xai', 'models', 'results']:
+    # 4. Outputs subdirectories: xai, models
+    for sub in ['xai', 'models']:
         sub_path = os.path.join(Config.OUTPUT_DIR, sub).replace('\\', '/')
         if os.path.exists(sub_path):
             try:
@@ -511,7 +511,28 @@ def clean_previous_run_artifacts(preserve_extracted_features: bool = True) -> No
             except Exception:
                 pass
 
-    # 5. Stale evaluation metrics, tables, and caches in BASE_OUTPUT and OUTPUT_DIR
+    # Results folder handling (Preserve splits.pt and clinical_data_v2.pt when caching is active)
+    results_path = os.path.join(Config.OUTPUT_DIR, 'results').replace('\\', '/')
+    if os.path.exists(results_path):
+        if not preserve_extracted_features:
+            try:
+                shutil.rmtree(results_path)
+                cleaned_items.append(f"Wiped results directory: {results_path}")
+            except Exception:
+                pass
+        else:
+            for f in glob.glob(os.path.join(results_path, '*')):
+                fname = os.path.basename(f)
+                if fname not in ['splits.pt', 'clinical_data_v2.pt']:
+                    try:
+                        if os.path.isdir(f):
+                            shutil.rmtree(f)
+                        else:
+                            os.remove(f)
+                        cleaned_items.append(f"Removed stale result: {fname}")
+                    except Exception:
+                        pass
+
     # 5. Stale evaluation metrics, tables, and caches in OUTPUT_DIR (Never delete root workspace files)
     target_patterns = [
         os.path.join(Config.OUTPUT_DIR, '*.csv'),
@@ -528,7 +549,7 @@ def clean_previous_run_artifacts(preserve_extracted_features: bool = True) -> No
         ])
 
     preserve_whitelist = [
-        'node_features', 'splits.pt', 'node_labels', 'node_cog_scores',
+        'node_features', 'splits.pt', 'clinical_data_v2.pt', 'node_labels', 'node_cog_scores',
         'processed_files.csv', 'radiomics_features.csv', 'preprocessed_metadata.csv'
     ]
 
