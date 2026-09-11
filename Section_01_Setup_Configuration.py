@@ -244,10 +244,10 @@ class Config:
     # ── Graph Neural Network (NeuroGAT A* Edition) ──
     KNN_K = 5                     # Meso-scale neighborhood
     KNN_K_LIST = [3, 5, 10]       # Multi-scale neighborhood (Micro, Meso, Macro)
-    GAT_HIDDEN_DIM = 128          # Hidden dimensions in GATv2 layers
+    GAT_HIDDEN_DIM = 64           # Calibrated hidden dim (64 * 4 heads = 256 prevents memorization on ~377 train nodes)
     GAT_HEADS = 4                 # Multi-head attention heads in GATv2
-    GAT_DROPOUT = 0.15            # Calibrated dropout for graph representation (relaxed from 0.35 to prevent underfitting)
-    L2_REGULARIZATION = 1e-4      # Weight decay for GAT (relaxed from 1e-3)
+    GAT_DROPOUT = 0.30            # Robust dropout for graph attention (prevents co-adaptation)
+    L2_REGULARIZATION = 1e-3      # Weight decay for GAT parameters
     AUX_COG_WEIGHT = 0.0          # Classification-only ablation mode (0.0 decouples cognitive regression to prevent class collapse)
 
     # ── Cohort Participant-Level Independence ──
@@ -269,28 +269,28 @@ class Config:
     FORBIDDEN_GRAPH_VARIABLES = {'MMSE', 'CDRSB', 'LogMem_Delayed', 'LogMem_Immediate', 'DX', 'DX_bl'}
 
     # ── Classifier Head ──
-    CLASSIFIER_DROPOUT = 0.20     # Calibrated dropout (relaxed from 0.45 to prevent underfitting on 472 train nodes)
+    CLASSIFIER_DROPOUT = 0.35     # Elevated dropout on classification head to halt overfitting
 
     # ── Training Hyperparameters (GNN is Transductive Full-Batch) ──
     BATCH_SIZE = 1                # GNN processes the entire graph as a single batch
     GRAD_ACCUM_STEPS = 1          # Gradient accumulation steps
     EPOCHS = 200                  # Maximum training epochs
-    PATIENCE = 40                 # Early stopping patience
+    PATIENCE = 15                 # Early stopping patience (halts training as soon as val loss diverges after epoch 10-15)
     MONITOR_METRIC = 'val_loss'   # Monitor validation loss strictly
 
     # ── Optimizer & Anti-Overfitting Learning Rate Scheduler ──
     LEARNING_RATE = 5e-4          # Optimal learning rate for AdamW
-    WEIGHT_DECAY = 1e-4           # Calibrated weight decay (1e-4 avoids stifling capacity)
+    WEIGHT_DECAY = 1e-3           # Robust weight decay (1e-3 regularizes weights against overfitting)
     BETAS = (0.9, 0.999)
-    LR_SCHEDULER_TYPE = 'CosineAnnealingWarmRestarts'  # Cyclic exploration prevents premature stagnation
-    LR_PLATEAU_FACTOR = 0.7       # Smooth decay if ReduceLROnPlateau selected
-    LR_PLATEAU_PATIENCE = 12      # Sufficient patience before reducing LR
-    WARMUP_EPOCHS = 10
+    LR_SCHEDULER_TYPE = 'ReduceLROnPlateau'  # Smooth plateau decay locks in optimal validation loss
+    LR_PLATEAU_FACTOR = 0.5       # Halves learning rate when validation loss stalls
+    LR_PLATEAU_PATIENCE = 6       # Decay LR promptly when validation loss plateaus
+    WARMUP_EPOCHS = 5
     T_0 = 25                      # Period for CosineAnnealingWarmRestarts
     T_MULT = 2
 
     # ── Loss & Cost-Sensitive Learning (Targeting 85-88% with Calibrated LMCI F1) ──
-    LABEL_SMOOTHING = 0.05        # Label smoothing for focal / cross-entropy loss
+    LABEL_SMOOTHING = 0.10        # 0.10 label smoothing prevents overconfident overfitted probabilities
     FOCAL_GAMMA = 1.0             # Focusing parameter if focal loss enabled
     USE_FOCAL_LOSS = False        # False: Standard symmetrical Cross-Entropy (eliminates LMCI bias and restores CN/EMCI recall)
     CUSTOM_CLASS_WEIGHTS = [1.0, 1.0, 1.0, 1.0]  # Neutral base weights
@@ -306,8 +306,8 @@ class Config:
     EFFECTIVE_NUM_BETA = 0.999                   # Beta=0.999 if effective samples enabled
 
     # ── Graph Regularization & Publication Rigor (Q1 Upgrades) ──
-    USE_DROPEDGE = False                         # Preserves full graph topology to resolve underfitting
-    DROPEDGE_RATE = 0.0                          # DropEdge rate set to 0.0 for stable message passing
+    USE_DROPEDGE = True                          # DropEdge (ICLR 2020): random edge removal halts neighborhood memorization
+    DROPEDGE_RATE = 0.20                         # 20% random edge dropping during training for structural regularization
     BOOTSTRAP_ITERATIONS = 1000                  # 1,000 resamplings for 95% Confidence Intervals
     MCNEMAR_CORRECTION = 'holm-bonferroni'       # Stepwise family-wise error rate control
     GENERATE_LATEX_TABLES = True                 # Export camera-ready booktabs .tex tables
