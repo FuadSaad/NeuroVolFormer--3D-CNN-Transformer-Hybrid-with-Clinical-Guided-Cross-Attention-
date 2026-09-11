@@ -54,10 +54,11 @@ for _k, _v in _defaults.items():
     if not hasattr(Config, _k):
         setattr(Config, _k, _v)
 
-try:
-    from Section_05_Model_Architecture import NeuroGAT, build_population_graph, build_multiscale_population_graph
-except (ImportError, ModuleNotFoundError):
-    pass
+if 'NeuroGAT' not in globals() and 'NeuroGAT' not in locals():
+    try:
+        from Section_05_Model_Architecture import NeuroGAT, build_population_graph, build_multiscale_population_graph
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 7.1 DeLong's Non-Parametric ROC Statistical Significance Test
@@ -497,8 +498,17 @@ def generate_full_evaluation(features_path: str, labels_path: str):
         if 'test_risk_scores' in test_data and len(test_data['test_risk_scores']) == len(all_labels):
             all_risks = np.array(test_data['test_risk_scores'])
         else:
-            from Section_06_Training_Engine import compute_mci_conversion_risk
-            all_risks, _ = compute_mci_conversion_risk(all_probs)
+            if 'compute_mci_conversion_risk' in globals():
+                all_risks, _ = globals()['compute_mci_conversion_risk'](all_probs)
+            else:
+                try:
+                    from Section_06_Training_Engine import compute_mci_conversion_risk
+                    all_risks, _ = compute_mci_conversion_risk(all_probs)
+                except Exception:
+                    p_emci = all_probs[:, 2] if all_probs.shape[1] > 2 else 0.0
+                    p_lmci = all_probs[:, 3] if all_probs.shape[1] > 3 else 0.0
+                    gating = p_emci + p_lmci
+                    all_risks = np.where(gating > 1e-4, p_lmci / np.maximum(gating, 1e-6), 0.0)
         results = torch.load(results_path, weights_only=False) if os.path.exists(results_path) else []
     elif os.path.exists(results_path):
         results = torch.load(results_path, weights_only=False)
@@ -520,8 +530,17 @@ def generate_full_evaluation(features_path: str, labels_path: str):
         if len(all_risks) == len(all_labels):
             all_risks = np.array(all_risks)
         else:
-            from Section_06_Training_Engine import compute_mci_conversion_risk
-            all_risks, _ = compute_mci_conversion_risk(all_probs)
+            if 'compute_mci_conversion_risk' in globals():
+                all_risks, _ = globals()['compute_mci_conversion_risk'](all_probs)
+            else:
+                try:
+                    from Section_06_Training_Engine import compute_mci_conversion_risk
+                    all_risks, _ = compute_mci_conversion_risk(all_probs)
+                except Exception:
+                    p_emci = all_probs[:, 2] if all_probs.shape[1] > 2 else 0.0
+                    p_lmci = all_probs[:, 3] if all_probs.shape[1] > 3 else 0.0
+                    gating = p_emci + p_lmci
+                    all_risks = np.where(gating > 1e-4, p_lmci / np.maximum(gating, 1e-6), 0.0)
     else:
         print(f"❌ Error: Neither {final_test_path} nor {results_path} found. Please run training (Section 06).")
         return

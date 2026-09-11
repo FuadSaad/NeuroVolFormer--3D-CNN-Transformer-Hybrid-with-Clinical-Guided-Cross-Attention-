@@ -24,12 +24,18 @@ except ImportError:
     except Exception:
         sitk = None
 
-try:
-    from Section_01_Setup_Configuration import Config
-    from Section_04_Dataset_DataLoader import ADNIDataset
-except ImportError:
-    # If running sequentially in Kaggle Notebook cells, these are already in memory
-    pass
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
+
+if 'ADNIDataset' not in globals() and 'ADNIDataset' not in locals():
+    try:
+        from Section_04_Dataset_DataLoader import ADNIDataset
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 # Guarantee Config directory attributes exist even if older Config is in memory
 base_out = '/kaggle/working' if os.path.exists('/kaggle') else '.'

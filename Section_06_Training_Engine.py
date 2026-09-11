@@ -76,10 +76,11 @@ for _k, _v in _defaults.items():
     if not hasattr(Config, _k):
         setattr(Config, _k, _v)
 
-try:
-    from Section_05_Model_Architecture import NeuroGAT, build_population_graph, build_multiscale_population_graph
-except (ImportError, ModuleNotFoundError):
-    pass
+if 'NeuroGAT' not in globals() and 'NeuroGAT' not in locals():
+    try:
+        from Section_05_Model_Architecture import NeuroGAT, build_population_graph, build_multiscale_population_graph
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 6.1 Cost-Sensitive Balanced Focal Loss & Logit Adjustment (NeurIPS 2020)
@@ -734,10 +735,39 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     # Fit Post-Hoc Temperature Scaling on Out-of-Fold (OOF) Logits across all 5 folds
     temp_scaler = None
     try:
-        from Section_07_Evaluation_Metrics import TemperatureScaling
+        if 'TemperatureScaling' in globals():
+            ScalerCls = globals()['TemperatureScaling']
+        elif 'TemperatureScaling' in locals():
+            ScalerCls = locals()['TemperatureScaling']
+        else:
+            try:
+                from Section_07_Evaluation_Metrics import TemperatureScaling as ScalerCls
+            except Exception:
+                class ScalerCls:
+                    def __init__(self):
+                        self.temperature = 1.0
+                    def fit(self, val_logits: np.ndarray, val_labels: np.ndarray) -> float:
+                        logits_t = torch.tensor(val_logits, dtype=torch.float32)
+                        labels_t = torch.tensor(val_labels, dtype=torch.long)
+                        temp = torch.nn.Parameter(torch.ones(1) * 1.5)
+                        optimizer = torch.optim.LBFGS([temp], lr=0.01, max_iter=50)
+                        def _eval():
+                            optimizer.zero_grad()
+                            t_clamped = torch.clamp(temp, min=0.01, max=10.0)
+                            scaled_logits = logits_t / t_clamped
+                            loss = torch.nn.functional.cross_entropy(scaled_logits, labels_t)
+                            loss.backward()
+                            return loss
+                        try:
+                            optimizer.step(_eval)
+                            self.temperature = float(torch.clamp(temp, min=0.01, max=10.0).detach().item())
+                        except Exception:
+                            self.temperature = 1.0
+                        return self.temperature
+
         oof_all_logits = np.concatenate(oof_val_logits, axis=0)
         oof_all_labels = np.concatenate(oof_val_labels, axis=0)
-        temp_scaler = TemperatureScaling()
+        temp_scaler = ScalerCls()
         temp_scaler.fit(oof_all_logits, oof_all_labels)
         scaler_save_path = os.path.join(output_dir, 'results', 'temperature_scaler.pt')
         torch.save({'temperature': float(temp_scaler.temperature)}, scaler_save_path)

@@ -27,10 +27,12 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_curve, auc, precision_recall_fscore_support
 import xgboost as xgb
 
-try:
-    from Section_01_Setup_Configuration import Config
-except (ImportError, ModuleNotFoundError):
-    pass
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 10.1 Plotting Functions

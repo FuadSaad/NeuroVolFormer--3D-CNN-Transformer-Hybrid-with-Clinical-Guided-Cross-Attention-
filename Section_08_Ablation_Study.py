@@ -26,12 +26,24 @@ try:
 except ImportError:
     pass
 
-try:
-    from Section_01_Setup_Configuration import Config
-    from Section_05_Model_Architecture import build_population_graph, build_multiscale_population_graph, NeuroGAT
-    from Section_06_Training_Engine import GNNTrainer
-except (ImportError, ModuleNotFoundError):
-    pass
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
+
+if 'NeuroGAT' not in globals() and 'NeuroGAT' not in locals():
+    try:
+        from Section_05_Model_Architecture import build_population_graph, build_multiscale_population_graph, NeuroGAT
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+if 'GNNTrainer' not in globals() and 'GNNTrainer' not in locals():
+    try:
+        from Section_06_Training_Engine import GNNTrainer
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 8.1 Visualizations Helper Functions

@@ -27,15 +27,21 @@ try:
 except ImportError:
     filters = None
 
-try:
-    from Section_01_Setup_Configuration import Config, format_time
-except (ImportError, ModuleNotFoundError):
-    class Config:
-        pass
-    def format_time(seconds: float) -> str:
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
+
+if 'format_time' not in globals() and 'format_time' not in locals():
+    try:
+        from Section_01_Setup_Configuration import format_time
+    except (ImportError, ModuleNotFoundError):
+        def format_time(seconds: float) -> str:
+            m, s = divmod(int(seconds), 60)
+            h, m = divmod(m, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
 
 # ═══════════════════════════════════════════════════════════════════
 # 3.1 Discover NIfTI Files

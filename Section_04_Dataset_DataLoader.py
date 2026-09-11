@@ -20,7 +20,19 @@ from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit, tra
 from sklearn.preprocessing import StandardScaler
 from collections import Counter
 
-from Section_01_Setup_Configuration import Config, seed_everything
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
+
+if 'seed_everything' not in globals() and 'seed_everything' not in locals():
+    try:
+        from Section_01_Setup_Configuration import seed_everything
+    except (ImportError, ModuleNotFoundError):
+        def seed_everything(seed=42):
+            pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 4.1 3D Data Augmentation

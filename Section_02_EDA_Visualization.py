@@ -20,7 +20,12 @@ try:
 except ImportError:
     nib = None
 
-from Section_01_Setup_Configuration import Config
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════
 # 2.1 Load & Merge All CSV Data

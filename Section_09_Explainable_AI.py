@@ -52,11 +52,18 @@ try:
 except ImportError:
     pass
 
-try:
-    from Section_01_Setup_Configuration import Config
-    from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
-except (ImportError, ModuleNotFoundError):
-    pass
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
+
+if 'NeuroGAT' not in globals() and 'NeuroGAT' not in locals():
+    try:
+        from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════

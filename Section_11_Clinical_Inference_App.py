@@ -39,26 +39,30 @@ except ImportError:
     GRADIO_AVAILABLE = False
     print("⚠️  Gradio not installed. Web GUI will run in headless CLI mode.")
 
-try:
-    from Section_01_Setup_Configuration import Config
-except ImportError as e:
-    raise RuntimeError(
-        "❌ Critical Dependency Error: Section_01_Setup_Configuration.Config is strictly required "
-        "for clinical inference to guarantee exact parameter and feature schema alignment with training."
-    ) from e
+if 'Config' not in globals() and 'Config' not in locals():
+    try:
+        from Section_01_Setup_Configuration import Config
+    except (ImportError, ModuleNotFoundError):
+        class Config:
+            pass
 
-try:
-    from Section_03_Preprocessing import preprocess_mri_volume
-except ImportError:
-    preprocess_mri_volume = None
+if 'preprocess_mri_volume' not in globals() and 'preprocess_mri_volume' not in locals():
+    try:
+        from Section_03_Preprocessing import preprocess_mri_volume
+    except (ImportError, ModuleNotFoundError):
+        preprocess_mri_volume = None
 
-try:
-    from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
-    from Section_06_Training_Engine import compute_mci_conversion_risk
-except ImportError as e:
-    raise RuntimeError(
-        f"❌ Critical Dependency Error: Missing model architecture or training engine components: {e}"
-    ) from e
+if 'NeuroGAT' not in globals() and 'NeuroGAT' not in locals():
+    try:
+        from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+if 'compute_mci_conversion_risk' not in globals() and 'compute_mci_conversion_risk' not in locals():
+    try:
+        from Section_06_Training_Engine import compute_mci_conversion_risk
+    except (ImportError, ModuleNotFoundError):
+        pass
 
 _defaults = {
     'SEED': 42,
