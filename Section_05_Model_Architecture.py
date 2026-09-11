@@ -84,11 +84,11 @@ def build_multiscale_population_graph(
 
     # 2. Dimensionality Reduction for Deep Features if raw 1024-D
     if features.shape[1] >= 1024:
+        deep_features = features[:, :1024]
+        handcrafted = features[:, 1024:]
         req_pca_dim = getattr(Config, 'PCA_DIM', 64)
         max_possible_dim = len(train_indices) - 1 if (train_indices is not None and len(train_indices) > 0) else len(deep_features) - 1
         pca_dim = min(req_pca_dim, max(1, max_possible_dim))
-        deep_features = features[:, :1024]
-        handcrafted = features[:, 1024:]
 
         print(f"🧠 Applying PCA to Deep Features (1024 -> {pca_dim} dims)...")
         pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
@@ -159,10 +159,12 @@ def build_multiscale_population_graph(
                     for j in range(0, min(k, len(train_idx_arr))):
                         global_neighbor = train_idx_arr[idx_nt[local_u, j]]
                         sim = max(0.0, 1.0 - dist_nt[local_u, j])
-                        for edge in [(global_u, global_neighbor), (global_neighbor, global_u)]:
-                            if edge not in edge_dict:
-                                edge_dict[edge] = 0.0
-                            edge_dict[edge] += scale_weights[k] * sim
+                        # Strictly unidirectional: training reference (source) -> non-training query (target)
+                        # Prevents training nodes from aggregating non-training node representations
+                        edge = (global_neighbor, global_u)
+                        if edge not in edge_dict:
+                            edge_dict[edge] = 0.0
+                        edge_dict[edge] += scale_weights[k] * sim
     else:
         knn = NearestNeighbors(n_neighbors=max_k + 1, metric='cosine')
         knn.fit(features_norm)
@@ -180,18 +182,13 @@ def build_multiscale_population_graph(
                             edge_dict[edge] = 0.0
                         edge_dict[edge] += scale_weights[k] * sim
 
-    edge_src = []
-    edge_dst = []
-    edge_weights = []
+    edges = list(edge_dict.keys())
+    weights = list(edge_dict.values())
 
-    for (src, dst), weight in edge_dict.items():
-        edge_src.append(src)
-        edge_dst.append(dst)
-        edge_weights.append(weight)
-
-    edge_index = torch.tensor([edge_src, edge_dst], dtype=torch.long)
-    edge_weight = torch.tensor(edge_weights, dtype=torch.float32).unsqueeze(1)  # Shape: (E, 1)
-    x = torch.tensor(features_norm, dtype=torch.float32)
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    edge_weight = torch.tensor(weights, dtype=torch.float32).unsqueeze(1)
+    features_fused = features_norm
+    x = torch.tensor(features_fused, dtype=torch.float32)
 
     graph_data = Data(x=x, edge_index=edge_index, edge_attr=edge_weight)
     if 'ev_sum' in locals():
@@ -201,8 +198,8 @@ def build_multiscale_population_graph(
 
 
 def build_population_graph(features: np.ndarray, k: int = 5, train_indices: Optional[Any] = None) -> Data:
-    """Backward-compatible wrapper defaulting to multi-scale population graph."""
-    return build_multiscale_population_graph(features, k_list=[3, k, 10], train_indices=train_indices)
+    """Builds a true single-scale population graph with K neighbors."""
+    return build_multiscale_population_graph(features, k_list=[k], train_indices=train_indices)
 
 
 

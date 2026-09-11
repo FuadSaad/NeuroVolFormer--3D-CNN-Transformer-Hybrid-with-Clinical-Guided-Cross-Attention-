@@ -11,6 +11,8 @@
 """
 
 import os
+import gc
+import json
 import time
 import copy
 from typing import Optional, Tuple, Dict, Any, List, Union
@@ -144,14 +146,16 @@ class CostSensitiveBalancedFocalLoss(nn.Module):
                 self.logit_adjustment = self.logit_adjustment.to(inputs.device)
             inputs = inputs + self.logit_adjustment
 
-        # 1. Compute unweighted cross-entropy to get true p_t for the focal modulating factor (Lin et al., ICCV 2017)
+        # 1. Compute true p_t directly from softmax probabilities (Lin et al., ICCV 2017)
+        probs = F.softmax(inputs, dim=-1)
+        pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        focal_weight = (1.0 - pt).clamp(min=0.0, max=1.0) ** self.gamma
+
         ce_loss_raw = F.cross_entropy(
             inputs, targets,
             label_smoothing=self.label_smoothing,
             reduction='none'
         )
-        pt = torch.exp(-ce_loss_raw)
-        focal_weight = (1.0 - pt) ** self.gamma
 
         # 2. Apply class importance weights (alpha) linearly (Cui et al., CVPR 2019)
         if self.alpha is not None:
@@ -231,7 +235,7 @@ def compute_mci_conversion_risk(
                          - 'Moderate Progression Risk (25-60%)'
                          - 'High Progression Risk (>60%)'
     """
-    probs = np.asarray(probs)
+    probs = np.atleast_2d(np.asarray(probs))
     p_ad = probs[:, 0]
     p_emci = probs[:, 2]
     p_lmci = probs[:, 3]
@@ -239,8 +243,9 @@ def compute_mci_conversion_risk(
     # MCI progression ratio
     mci_ratio = p_lmci / (p_emci + p_lmci + 1e-6)
 
-    # Base progression hazard index
-    base_hazard = 0.50 * p_lmci + 0.35 * p_ad + 0.15 * mci_ratio
+    # Base progression hazard index: gated by total MCI probability to eliminate false hazard on healthy controls
+    p_mci_total = p_emci + p_lmci
+    base_hazard = 0.50 * p_lmci + 0.35 * p_ad + 0.15 * p_mci_total * mci_ratio
 
     if cognitive_scores is not None:
         cog = np.asarray(cognitive_scores).squeeze()
@@ -336,7 +341,7 @@ class GNNTrainer:
         else:
             class_weights = compute_class_weight(
                 class_weight='balanced',
-                classes=np.unique(train_labels),
+                classes=np.arange(num_cls),
                 y=train_labels
             )
             weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
@@ -353,8 +358,8 @@ class GNNTrainer:
             cost_matrix[1, 0] = 1.5     # True CN predicted as AD
 
         # 4. Enable Criterion (ClassBalancedFocalLoss or CrossEntropyLoss)
-        use_focal = getattr(Config, 'USE_FOCAL_LOSS', True)
-        focal_gamma = getattr(Config, 'FOCAL_GAMMA', 1.5)
+        use_focal = getattr(Config, 'USE_FOCAL_LOSS', False)
+        focal_gamma = getattr(Config, 'FOCAL_GAMMA', 1.0)
         label_smoothing = getattr(Config, 'LABEL_SMOOTHING', 0.05)
         if use_focal:
             self.criterion = CostSensitiveBalancedFocalLoss(
@@ -371,11 +376,12 @@ class GNNTrainer:
             )
 
         # DropEdge Regularization Parameters
-        self.use_dropedge = getattr(Config, 'USE_DROPEDGE', True)
-        self.dropedge_rate = getattr(Config, 'DROPEDGE_RATE', 0.15)
+        self.use_dropedge = getattr(Config, 'USE_DROPEDGE', False)
+        self.dropedge_rate = getattr(Config, 'DROPEDGE_RATE', 0.0)
 
         self.best_val_acc = 0.0
         self.best_val_loss = float('inf')
+        self.best_epoch = 1
         self.best_model_wts = copy.deepcopy(self.model.state_dict())
         self.patience_counter = 0
         self.history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': [], 'val_mae': []}
@@ -489,7 +495,7 @@ class GNNTrainer:
 
         for epoch in range(1, epochs + 1):
             train_loss, train_acc = self.train_epoch()
-            val_loss, val_acc, val_mae, _, _, _, _, _ = self.evaluate(self.graph.val_mask)
+            val_loss, val_acc, val_mae, _, _, _, _, _, _ = self.evaluate(self.graph.val_mask)
 
             # Step ReduceLROnPlateau scheduler strictly based on validation loss
             if self.is_plateau_scheduler:
@@ -511,6 +517,7 @@ class GNNTrainer:
             if improved:
                 self.best_val_loss = val_loss
                 self.best_val_acc = val_acc
+                self.best_epoch = epoch
                 self.best_model_wts = copy.deepcopy(self.model.state_dict())
                 self.patience_counter = 0
                 torch.save({
@@ -545,6 +552,7 @@ class GNNTrainer:
         return {
             'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
+            'best_epoch': self.best_epoch,
             'val_acc': val_acc,
             'val_loss': val_loss,
             'val_mae': val_mae,
@@ -637,6 +645,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     splits_data = torch.load(splits_path, weights_only=False)
     test_indices = splits_data['test_indices']
     fold_splits = splits_data['fold_splits']
+    train_val_indices = [i for i in range(len(features)) if i not in set(test_indices)]
 
     k_list = getattr(Config, 'KNN_K_LIST', [3, getattr(Config, 'KNN_K', 5), 10])
 
@@ -796,7 +805,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     final_graph.test_mask = torch.zeros(final_graph.num_nodes, dtype=torch.bool).to(device)
     final_graph.test_mask[test_indices] = True
 
-    final_trainer = GNNTrainer(final_graph, fold=999, device=device)
+    final_trainer = GNNTrainer(final_graph, fold_idx=999, device=device)
     final_epochs = int(np.median([r.get('best_epoch', 50) for r in cv_results])) if len(cv_results) > 0 else 50
     print(f"🚀 Retraining final model for {final_epochs} epochs on 100% development cohort...")
     final_trainer.fit_development_final(epochs=final_epochs)
@@ -815,7 +824,6 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     print(f"💾 Exported final retrained model to: {final_ckpt_path}")
 
     # Export Model Manifest binding all artifacts together (Critique 29)
-    import json
     manifest = {
         "protocol_version": "v5.0-Q1-Gold-Standard",
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -823,7 +831,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         "deep_cnn_dim": 1024,
         "pca_dim": int(getattr(Config, 'PCA_DIM', 64)),
         "radiomics_dim": int(getattr(Config, 'RADIOMICS_FEATURE_DIM', 68)),
-        "clinical_dim": int(getattr(Config, 'CLINICAL_FEATURE_DIM', 6)),
+        "clinical_dim": int(getattr(Config, 'CLINICAL_DIM', 6)),
         "total_input_dim": int(getattr(Config, 'TOTAL_FEATURE_DIM', 138)),
         "num_classes": int(getattr(Config, 'NUM_CLASSES', 4)),
         "class_names": list(getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])),
@@ -863,6 +871,9 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     else:
         calibrated_test_probs = test_probs
 
+    # Recompute risk scores using calibrated probabilities (METH-13)
+    cal_risk, cal_strata = compute_mci_conversion_risk(calibrated_test_probs, test_cog)
+
     print(f"\n🎯 FINAL HELD-OUT TEST EVALUATION (N={len(test_indices)}):")
     print(f"   Accuracy: {test_acc*100:.2f}% | Loss: {test_loss:.4f} | Cognitive MAE: {test_mae:.4f}")
 
@@ -877,8 +888,8 @@ def train_gnn_5fold(features_path: str, labels_path: str):
         'test_logits': test_logits,
         'test_labels': test_labels,
         'test_cog_preds': test_cog,
-        'test_risk_scores': test_risk,
-        'test_risk_strata': test_strata,
+        'test_risk_scores': cal_risk,
+        'test_risk_strata': cal_strata,
         'labels': test_labels,
         'preds': test_preds,
         'probs': calibrated_test_probs

@@ -77,6 +77,8 @@ except ImportError:
             from torch_geometric.nn import GATConv
         except Exception:
             torch_geometric = None
+            Data = object
+            GATConv = object
     else:
         torch_geometric = None
         Data = object
@@ -381,7 +383,7 @@ class Config:
     FIGURES_DIR = os.path.join(BASE_OUTPUT, 'outputs/figures').replace('\\', '/')
 
     # ── Pipeline Execution & Clean-Slate Control ──
-    CLEAN_OUTPUTS_ON_START = True          # Auto-clean previous run checkpoints, figures & metrics for fresh run
+    CLEAN_OUTPUTS_ON_START = False         # Manual/flag control to prevent accidental data purge
     PRESERVE_EXTRACTED_FEATURES = True     # True: preserve node_features.npy, node_labels.npy, splits.pt (~3h runtime saved)
                                            # False: full nuclear purge of all preprocessed data as well
 
@@ -510,21 +512,31 @@ def clean_previous_run_artifacts(preserve_extracted_features: bool = True) -> No
                 pass
 
     # 5. Stale evaluation metrics, tables, and caches in BASE_OUTPUT and OUTPUT_DIR
+    # 5. Stale evaluation metrics, tables, and caches in OUTPUT_DIR (Never delete root workspace files)
     target_patterns = [
-        os.path.join(Config.BASE_OUTPUT, '*.pt'),
-        os.path.join(Config.BASE_OUTPUT, '*.tex'),
-        os.path.join(Config.BASE_OUTPUT, '*.png'),
         os.path.join(Config.OUTPUT_DIR, '*.csv'),
         os.path.join(Config.OUTPUT_DIR, '*.tex'),
         os.path.join(Config.OUTPUT_DIR, '*.pt'),
         os.path.join(Config.OUTPUT_DIR, '*.npy'),
         os.path.join(Config.OUTPUT_DIR, '*.txt'),
     ]
+    if Config.IS_KAGGLE:
+        target_patterns.extend([
+            os.path.join(Config.BASE_OUTPUT, '*.pt'),
+            os.path.join(Config.BASE_OUTPUT, '*.tex'),
+            os.path.join(Config.BASE_OUTPUT, '*.png'),
+        ])
+
+    preserve_whitelist = [
+        'node_features', 'splits.pt', 'node_labels', 'node_cog_scores',
+        'processed_files.csv', 'radiomics_features.csv', 'preprocessed_metadata.csv'
+    ]
+
     for pattern in target_patterns:
         for f in glob.glob(pattern):
             fname = os.path.basename(f)
-            # Guard against deleting essential preprocessed feature files
-            if preserve_extracted_features and ('node_features' in fname or 'splits.pt' in fname or 'node_labels' in fname):
+            # Guard against deleting essential preprocessed feature files and manifests
+            if preserve_extracted_features and any(pw in fname for pw in preserve_whitelist):
                 continue
             try:
                 os.remove(f)
@@ -678,26 +690,29 @@ def verify_dataset_paths() -> None:
 # 1.9 Initialize Everything
 # ═══════════════════════════════════════════════════════════════════
 
-print("╔══════════════════════════════════════════════════════════════╗")
-print("║     NeuroGAT 3D: Multimodal Graph Attention Network         ║")
-print("║     Alzheimer's Disease Classification from MPRAGE MRI      ║")
-print("╚══════════════════════════════════════════════════════════════╝")
-print()
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-seed_everything()
-DEVICE = setup_device()
+if __name__ == '__main__':
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║     NeuroGAT 3D: Multimodal Graph Attention Network         ║")
+    print("║     Alzheimer's Disease Classification from MPRAGE MRI      ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
+    print()
 
-# Clean-slate execution: purge previous artifacts if configured
-if Config.CLEAN_OUTPUTS_ON_START:
-    clean_previous_run_artifacts(preserve_extracted_features=Config.PRESERVE_EXTRACTED_FEATURES)
+    seed_everything()
+    DEVICE = setup_device()
 
-create_directories()
-setup_plotting()
-print_config(Config)
-verify_dataset_paths()
+    # Clean-slate execution: purge previous artifacts if configured
+    if Config.CLEAN_OUTPUTS_ON_START:
+        clean_previous_run_artifacts(preserve_extracted_features=Config.PRESERVE_EXTRACTED_FEATURES)
 
-print(f"\n✅ Section 1 Complete - All systems initialized!")
-print(f"   PyTorch version: {torch.__version__}")
-print(f"   Device: {DEVICE}")
-print(f"   {get_memory_usage()}")
+    create_directories()
+    setup_plotting()
+    print_config(Config)
+    verify_dataset_paths()
+
+    print(f"\n✅ Section 1 Complete - All systems initialized!")
+    print(f"   PyTorch version: {torch.__version__}")
+    print(f"   Device: {DEVICE}")
+    print(f"   {get_memory_usage()}")
 

@@ -139,10 +139,12 @@ def plot_class_attention_matrix(
     weights = alpha.cpu().numpy().squeeze()
 
     for src, dst, w in zip(src_nodes, dst_nodes, weights):
-        c_src = labels[src]
-        c_dst = labels[dst]
-        matrix[c_src, c_dst] += w
-        counts[c_src, c_dst] += 1
+        # In PyG, edge is src -> dst (dst aggregates from src)
+        # Therefore, dst is Query Patient, src is Attended Neighbor
+        c_query = labels[dst]
+        c_neighbor = labels[src]
+        matrix[c_query, c_neighbor] += w
+        counts[c_query, c_neighbor] += 1
 
     # Row-normalize to percentages
     row_sums = matrix.sum(axis=1, keepdims=True)
@@ -160,8 +162,8 @@ def plot_class_attention_matrix(
         annot_kws={'size': 13, 'weight': 'bold'}
     )
     plt.title("NeuroGAT Inter-Class Population Attention Flow (%)", fontsize=14, fontweight='bold', pad=15)
-    plt.xlabel("Attended Neighbor Class (Target Node j)", fontsize=12, fontweight='bold')
-    plt.ylabel("Query Patient Class (Source Node i)", fontsize=12, fontweight='bold')
+    plt.xlabel("Attended Neighbor Class (Source Node j)", fontsize=12, fontweight='bold')
+    plt.ylabel("Query Patient Class (Target Node i)", fontsize=12, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(Config.FIGURES_DIR, output_filename), dpi=300, bbox_inches='tight')
     plt.show()
@@ -186,13 +188,19 @@ def plot_patient_ego_network(
     dst_nodes = edge_index[1].cpu().numpy()
     weights = alpha.cpu().numpy().squeeze()
 
-    # Locate all edges originating from target_idx
-    mask = (src_nodes == target_idx)
-    neighbors = dst_nodes[mask]
+    # Locate all incoming edges into target_idx (query patient aggregates from neighbors)
+    mask = (dst_nodes == target_idx)
+    neighbors = src_nodes[mask]
     n_weights = weights[mask]
 
     if len(neighbors) == 0:
-        print("⚠️ No outgoing edges found for patient. Skipping ego-network.")
+        # Fallback to outgoing if bidirectional
+        mask = (src_nodes == target_idx)
+        neighbors = dst_nodes[mask]
+        n_weights = weights[mask]
+
+    if len(neighbors) == 0:
+        print("⚠️ No edges found for patient. Skipping ego-network.")
         return
 
     # Normalize neighbor weights for visualization
@@ -563,8 +571,21 @@ def run_all_xai(features_path: str, labels_path: str):
     y = np.load(labels_path)
     X_raw = np.nan_to_num(X_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Apply PCA on deep features if needed
-    if X_raw.shape[1] >= 1024:
+    # Apply PCA on deep features using frozen final_pca artifact if available
+    pca_file = os.path.join(Config.OUTPUT_DIR, 'results', 'final_pca.joblib')
+    if os.path.exists(pca_file) and X_raw.shape[1] >= 1024:
+        try:
+            import joblib
+            final_pca = joblib.load(pca_file)
+            deep_pca = final_pca.transform(X_raw[:, :1024])
+            X = np.concatenate([deep_pca, X_raw[:, 1024:]], axis=1)
+            print(f"📦 Loaded frozen PCA artifact from: {pca_file}")
+        except Exception:
+            pca_dim = getattr(Config, 'PCA_DIM', 64)
+            pca = PCA(n_components=pca_dim, random_state=Config.SEED)
+            deep_pca = pca.fit_transform(X_raw[:, :1024])
+            X = np.concatenate([deep_pca, X_raw[:, 1024:]], axis=1)
+    elif X_raw.shape[1] >= 1024:
         pca_dim = getattr(Config, 'PCA_DIM', 64)
         pca = PCA(n_components=pca_dim, random_state=Config.SEED)
         deep_pca = pca.fit_transform(X_raw[:, :1024])
@@ -592,6 +613,7 @@ def run_all_xai(features_path: str, labels_path: str):
     if not os.path.exists(best_model_path):
         best_model_path = os.path.join(Config.CHECKPOINT_DIR, 'fold0_best.pt')
 
+    neurogat = None
     if os.path.exists(best_model_path):
         try:
             print(f"📦 Loading trained NeuroGAT weights from {best_model_path}...")
@@ -621,9 +643,17 @@ def run_all_xai(features_path: str, labels_path: str):
         except Exception as e:
             print(f"⚠️ NeuroGAT Graph Attention visualization notice: {e}")
 
-    # 4. Standard Machine Learning Explainability (Gini, SHAP, LIME)
+    # 4. Standard Machine Learning Explainability (Surrogate fit on GNN predictions)
     rf = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=Config.SEED, n_jobs=-1)
-    rf.fit(X, y)
+    if neurogat is not None:
+        with torch.no_grad():
+            gnn_out = neurogat(graph_data.x, graph_data.edge_index, edge_attr=getattr(graph_data, 'edge_attr', None))
+            gnn_logits = gnn_out[0] if isinstance(gnn_out, tuple) else gnn_out
+            surrogate_y = gnn_logits.argmax(dim=1).cpu().numpy()
+            print("🧠 Fitting surrogate explainability model on NeuroGAT model predictions...")
+        rf.fit(X, surrogate_y)
+    else:
+        rf.fit(X, y)
 
     plot_gini_importance_grouped(rf, feature_names)
     plot_shap_summary(rf, X, feature_names)

@@ -107,7 +107,7 @@ def compute_mcnemar_test(y_true: np.ndarray, preds_proposed: np.ndarray, preds_b
     b = int(np.sum(correct_p & ~correct_b))
     c = int(np.sum(~correct_p & correct_b))
 
-    if b + c == 0:
+    if b + c == 0 or abs(b - c) <= 1.0:
         return 0.0, 1.0
 
     stat = (abs(b - c) - 1.0)**2 / (b + c)
@@ -189,19 +189,21 @@ def run_ml_baselines(features_path: str, labels_path: str):
     gnn_results_path = os.path.join(Config.OUTPUT_DIR, 'cv_gnn_results.pt')
     gnn_preds = None
     gnn_true = None
-    gnn_fold_accs = [0.81, 0.79, 0.82, 0.81, 0.80]
+    gnn_fold_accs = []
+
+    if os.path.exists(gnn_results_path):
+        try:
+            gnn_results = torch.load(gnn_results_path, weights_only=False)
+            gnn_fold_accs = [res.get('val_acc', res.get('best_val_acc', None)) for res in gnn_results]
+            gnn_fold_accs = [a for a in gnn_fold_accs if a is not None]
+        except Exception:
+            pass
 
     if os.path.exists(final_test_path):
         try:
             t_data = torch.load(final_test_path, weights_only=False)
             gnn_preds = np.array(t_data['preds'])
             gnn_true = np.array(t_data['labels'])
-        except Exception:
-            pass
-    elif os.path.exists(gnn_results_path):
-        try:
-            gnn_results = torch.load(gnn_results_path, weights_only=False)
-            gnn_fold_accs = [res.get('val_acc', res.get('best_val_acc', 0.80)) for res in gnn_results]
         except Exception:
             pass
 
@@ -267,7 +269,7 @@ def run_ml_baselines(features_path: str, labels_path: str):
 
         mean_cv_acc = np.mean(fold_accs) * 100
         std_cv_acc = np.std(fold_accs) * 100
-        prec, rec, f1, _ = precision_recall_fscore_support(all_val_labels, all_val_preds, average='weighted')
+        prec, rec, f1, _ = precision_recall_fscore_support(all_val_labels, all_val_preds, average='macro', zero_division=0)
         print(f"📊 {model_name} 5-Fold CV Mean: {mean_cv_acc:.2f}% ± {std_cv_acc:.2f}% | Macro F1: {f1 * 100:.2f}%")
 
         # ── Stage 2 & 3: Retrain on 100% Development Cohort & Evaluate Once on Held-Out Test ──
@@ -340,17 +342,34 @@ def run_ml_baselines(features_path: str, labels_path: str):
             del b_eval['raw_p']
             master_table.append(b_eval)
 
-    # Append Proposed NeuroGAT
-    mean_gnn_acc = np.mean(gnn_fold_accs) * 100
-    master_table.append({
-        'Category': 'Graph Neural Network',
-        'Baseline Model': 'NeuroGAT (Proposed)',
-        'Accuracy': f"{mean_gnn_acc:.2f}%",
-        'Precision': f"{mean_gnn_acc - 0.2:.2f}%",
-        'Recall': f"{mean_gnn_acc:.2f}%",
-        'F1-Score': f"{mean_gnn_acc - 0.15:.2f}%",
-        'Significance vs Proposed': 'Reference Baseline (N/A)'
-    })
+    # Append Proposed NeuroGAT using actual evaluated metrics (Zero Fabrication)
+    if gnn_true is not None and gnn_preds is not None and len(gnn_true) == len(gnn_preds):
+        real_acc = float(accuracy_score(gnn_true, gnn_preds) * 100)
+        prec, rec, f1, _ = precision_recall_fscore_support(gnn_true, gnn_preds, average='macro', zero_division=0)
+        master_table.append({
+            'Category': 'Graph Neural Network',
+            'Baseline Model': 'NeuroGAT (Proposed)',
+            'CV Acc': f"{np.mean(gnn_fold_accs)*100:.2f}%" if len(gnn_fold_accs) > 0 else "N/A",
+            'Test Acc': f"{real_acc:.2f}%",
+            'Accuracy': f"{real_acc:.2f}%",
+            'Precision': f"{prec * 100:.2f}%",
+            'Recall': f"{rec * 100:.2f}%",
+            'F1-Score': f"{f1 * 100:.2f}%",
+            'Significance vs Proposed': 'Reference Baseline (N/A)'
+        })
+    elif len(gnn_fold_accs) > 0:
+        mean_gnn_acc = float(np.mean(gnn_fold_accs) * 100)
+        master_table.append({
+            'Category': 'Graph Neural Network',
+            'Baseline Model': 'NeuroGAT (Proposed)',
+            'CV Acc': f"{mean_gnn_acc:.2f}%",
+            'Test Acc': "Pending Evaluation",
+            'Accuracy': f"{mean_gnn_acc:.2f}%",
+            'Precision': "N/A",
+            'Recall': "N/A",
+            'F1-Score': "N/A",
+            'Significance vs Proposed': 'Reference Baseline (N/A)'
+        })
 
     # Save and Display Master Table
     df = pd.DataFrame(master_table)
@@ -380,23 +399,30 @@ def export_baseline_table_to_latex(df_baselines: pd.DataFrame, output_dir: str):
         r"\small",
         r"\caption{Comprehensive Benchmark Comparison of Traditional Machine Learning Baselines vs. Proposed NeuroGAT under Patient-Level 5-Fold Cross-Validation.}",
         r"\label{tab:ml_baselines_comparison}",
-        r"\begin{tabular}{llccccc}",
+        r"\begin{tabular}{llcccccc}",
         r"\toprule",
-        r"\textbf{Paradigm} & \textbf{Model} & \textbf{Accuracy (\%)} & \textbf{Precision (\%)} & \textbf{Recall (\%)} & \textbf{F1-Score (\%)} & \textbf{Significance vs. Proposed} \\",
+        r"\textbf{Paradigm} & \textbf{Model} & \textbf{CV Acc (\%)} & \textbf{Test Acc (\%)} & \textbf{Precision (\%)} & \textbf{Recall (\%)} & \textbf{F1-Score (\%)} & \textbf{Significance vs. Proposed} \\",
         r"\midrule"
     ]
     for _, row in df_baselines.iterrows():
         is_proposed = "Proposed" in str(row['Baseline Model'])
+        cv_str = str(row.get('CV Acc', row.get('Accuracy', 'N/A')))
+        test_str = str(row.get('Test Acc', 'N/A'))
+        prec_str = str(row.get('Precision', 'N/A'))
+        rec_str = str(row.get('Recall', 'N/A'))
+        f1_str = str(row.get('F1-Score', 'N/A'))
+        sig_str = str(row.get('Significance vs Proposed', 'N/A'))
         if is_proposed:
             lines.append(r"\midrule")
             lines.append(
                 r"\textbf{" + str(row['Category']) + r"} & \textbf{" + str(row['Baseline Model']) +
-                r"} & \textbf{" + str(row['Accuracy']) + r"} & \textbf{" + str(row['Precision']) +
-                r"} & \textbf{" + str(row['Recall']) + r"} & \textbf{" + str(row['F1-Score']) +
-                r"} & \textbf{" + str(row['Significance vs Proposed']) + r"} \\"
+                r"} & \textbf{" + cv_str + r"} & \textbf{" + test_str +
+                r"} & \textbf{" + prec_str +
+                r"} & \textbf{" + rec_str + r"} & \textbf{" + f1_str +
+                r"} & \textbf{" + sig_str + r"} \\"
             )
         else:
-            lines.append(f"{row['Category']} & {row['Baseline Model']} & {row['Accuracy']} & {row['Precision']} & {row['Recall']} & {row['F1-Score']} & {row['Significance vs Proposed']} \\\\")
+            lines.append(f"{row['Category']} & {row['Baseline Model']} & {cv_str} & {test_str} & {prec_str} & {rec_str} & {f1_str} & {sig_str} \\\\")
 
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")

@@ -53,6 +53,8 @@ def plot_experiment_confusion_matrix(all_labels, all_preds, exp_name):
     plt.close()
 
 def plot_experiment_roc_curve(all_labels, all_probs, exp_name):
+    all_labels = np.asarray(all_labels)
+    all_probs = np.asarray(all_probs)
     n_classes = Config.NUM_CLASSES
     y_true_bin = np.zeros((len(all_labels), n_classes))
     for i, label in enumerate(all_labels):
@@ -317,6 +319,12 @@ def run_ablation_studies(features_path: str, labels_path: str):
                 lr=Config.LEARNING_RATE,
                 weight_decay=Config.L2_REGULARIZATION
             )
+            trainer.scheduler = CosineAnnealingWarmRestarts(
+                trainer.optimizer,
+                T_0=getattr(Config, 'T_0', 25),
+                T_mult=getattr(Config, 'T_MULT', 2),
+                eta_min=1e-5
+            )
 
             fold_res = trainer.fit()
             f_acc = fold_res.get('val_acc', fold_res.get('best_val_acc', 0.0)) * 100
@@ -382,9 +390,9 @@ def export_ablation_table_to_latex(df_ablation: pd.DataFrame, output_dir: str):
         r"\small",
         r"\caption{Comprehensive 10-Point Ablation Study on Modality Combinations and Graph Architectures.}",
         r"\label{tab:ablation_study}",
-        r"\begin{tabular}{llcccc}",
+        r"\begin{tabular}{llcc}",
         r"\toprule",
-        r"\textbf{Category} & \textbf{Experimental Variant} & \textbf{Accuracy (\%)} & \textbf{Precision (\%)} & \textbf{Recall (\%)} & \textbf{F1-Score (\%)} \\",
+        r"\textbf{Category} & \textbf{Experimental Variant} & \textbf{Accuracy (\%)} & \textbf{Macro F1 (\%)} \\",
         r"\midrule"
     ]
     curr_cat = None
@@ -395,14 +403,16 @@ def export_ablation_table_to_latex(df_ablation: pd.DataFrame, output_dir: str):
         curr_cat = cat
         name = str(row['Ablation Model'])
         is_full = "Full" in name or "Proposed" in name or "NeuroGAT" in name
+        acc_val = str(row['Accuracy'])
+        f1_val = str(row['Macro F1'])
         if is_full:
             lines.append(
                 r"\textbf{" + cat + r"} & \textbf{" + name +
-                r"} & \textbf{" + str(row['Accuracy']) + r"} & \textbf{" + str(row['Precision']) +
-                r"} & \textbf{" + str(row['Recall']) + r"} & \textbf{" + str(row['F1-Score']) + r"} \\"
+                r"} & \textbf{" + acc_val +
+                r"} & \textbf{" + f1_val + r"} \\"
             )
         else:
-            lines.append(f"{cat} & {name} & {row['Accuracy']} & {row['Precision']} & {row['Recall']} & {row['F1-Score']} \\\\")
+            lines.append(f"{cat} & {name} & {acc_val} & {f1_val} \\\\")
 
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")

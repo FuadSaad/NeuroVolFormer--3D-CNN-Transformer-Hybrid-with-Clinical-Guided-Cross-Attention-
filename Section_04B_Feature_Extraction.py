@@ -26,7 +26,7 @@ except ImportError:
 
 try:
     from Section_01_Setup_Configuration import Config
-    from Section_04_Dataset_DataLoader import ADNIDataset, get_loaders_for_fold
+    from Section_04_Dataset_DataLoader import ADNIDataset
 except ImportError:
     # If running sequentially in Kaggle Notebook cells, these are already in memory
     pass
@@ -158,9 +158,18 @@ def get_pretrained_densenet(device):
                 print(f"📦 [Tier 1/2] Loading verified 3D DenseNet-121 weights from: {resolved_path}")
                 ckpt = torch.load(resolved_path, map_location=device, weights_only=False)
                 state = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
-                model.load_state_dict(state, strict=False)
-                weights_loaded = True
-                print("✅ Successfully loaded 3D DenseNet-121 biomedical weights.")
+                # Strip module. prefix if DataParallel
+                state = {k.replace('module.', ''): v for k, v in state.items()}
+                incompatible = model.load_state_dict(state, strict=False)
+                model_keys = set(model.state_dict().keys())
+                ckpt_keys = set(state.keys())
+                matched = model_keys.intersection(ckpt_keys)
+                if len(matched) > 10:
+                    weights_loaded = True
+                    print(f"✅ Successfully loaded {len(matched)} matching 3D DenseNet-121 weight tensors.")
+                else:
+                    print(f"⚠️ Checkpoint key mismatch: only {len(matched)} keys matched MONAI DenseNet-121.")
+                    weights_loaded = False
             elif require_pretrained:
                 # Tier 3: Attempt MONAI / Torch hub model zoo download
                 try:
@@ -248,17 +257,17 @@ def extract_native_radiomics(volume_np: np.ndarray, target_dim: int = 68) -> np.
 
     # 3. Spatial gradients & Edge features (20 features)
     sub = volume_np[::2, ::2, ::2]
-    gz, gy, gx = np.gradient(sub)
-    gmag = np.sqrt(gz**2 + gy**2 + gx**2)
+    gx, gy, gz = np.gradient(sub)
+    gmag = np.sqrt(gx**2 + gy**2 + gz**2)
     g_nz = gmag[gmag > 0]
     if len(g_nz) > 0:
         feats.extend([
             float(np.mean(g_nz)), float(np.std(g_nz)),
             float(np.max(g_nz)), float(np.median(g_nz)),
             float(np.percentile(g_nz, 10)), float(np.percentile(g_nz, 90)),
-            float(np.mean(gz)), float(np.std(gz)),
-            float(np.mean(gy)), float(np.std(gy)),
             float(np.mean(gx)), float(np.std(gx)),
+            float(np.mean(gy)), float(np.std(gy)),
+            float(np.mean(gz)), float(np.std(gz)),
             float(np.var(gmag)), float(np.sum(gmag > 0.1) / (gmag.size + 1e-7)),
             float(np.percentile(gmag, 25)), float(np.percentile(gmag, 75)),
             float(np.percentile(gmag, 5)), float(np.percentile(gmag, 95)),
@@ -452,15 +461,11 @@ def main():
         print("[INFO] Section 04B ready. Run Section 04 to generate data manifest and clinical features first.")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Execute Feature Extraction
-# ═══════════════════════════════════════════════════════════════════
-try:
-    # If running sequentially in Kaggle, file_df and clinical_features are in memory
-    if 'file_df' in locals() or 'file_df' in globals():
+if __name__ == '__main__':
+    main()
+elif 'file_df' in locals() or 'file_df' in globals():
+    try:
         run_feature_extraction(file_df, clinical_features)
-    else:
-        print("Section 4B (Feature Extraction) Loaded.")
-except Exception as e:
-    print(f"⚠️ Could not auto-run Section 4B: {e}")
+    except Exception as e:
+        print(f"⚠️ Could not auto-run Section 4B: {e}")
 

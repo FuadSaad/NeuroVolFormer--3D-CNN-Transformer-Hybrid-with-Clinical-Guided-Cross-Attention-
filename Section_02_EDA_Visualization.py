@@ -6,6 +6,22 @@
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+import os
+import sys
+import glob
+from typing import Optional, Dict, Any, List
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+try:
+    import nibabel as nib
+except ImportError:
+    nib = None
+
+from Section_01_Setup_Configuration import Config
+
 # ═══════════════════════════════════════════════════════════════════
 # 2.1 Load & Merge All CSV Data
 # ═══════════════════════════════════════════════════════════════════
@@ -437,11 +453,11 @@ def plot_demographic_table(df: pd.DataFrame) -> None:
         edu_str = f"{subset['EDUCATION'].mean():.1f} ± {subset['EDUCATION'].std():.1f}" if 'EDUCATION' in subset.columns and subset['EDUCATION'].notna().any() else "N/A"
 
         if 'Sex' in subset.columns:
-            male = (subset['Sex'] == 'M').sum()
-            female = (subset['Sex'] == 'F').sum()
+            male = int((subset['Sex'].astype(str).str.upper().isin(['M', 'MALE'])).sum())
+            female = int((subset['Sex'].astype(str).str.upper().isin(['F', 'FEMALE'])).sum())
         elif 'GENDER' in subset.columns:
-            male = (subset['GENDER'] == 0).sum() + (subset['GENDER'] == 0.0).sum()
-            female = (subset['GENDER'] == 1).sum() + (subset['GENDER'] == 1.0).sum()
+            male = int((subset['GENDER'].astype(str).isin(['0', '0.0', 'M', 'Male'])).sum())
+            female = int((subset['GENDER'].astype(str).isin(['1', '1.0', 'F', 'Female'])).sum())
         else:
             male, female = 'N/A', 'N/A'
 
@@ -563,5 +579,5 @@ def run_full_eda():
 
     return merged_df
 
-# Run EDA
-merged_df = run_full_eda()
+if __name__ == '__main__':
+    merged_df = run_full_eda()

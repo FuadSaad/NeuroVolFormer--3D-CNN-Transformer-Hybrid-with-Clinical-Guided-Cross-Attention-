@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from scipy import ndimage
 from tqdm import tqdm
 
@@ -27,9 +28,14 @@ except ImportError:
     filters = None
 
 try:
-    from Section_01_Setup_Configuration import Config
+    from Section_01_Setup_Configuration import Config, format_time
 except (ImportError, ModuleNotFoundError):
-    pass
+    class Config:
+        pass
+    def format_time(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
 # ═══════════════════════════════════════════════════════════════════
 # 3.1 Discover NIfTI Files

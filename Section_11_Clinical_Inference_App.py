@@ -400,8 +400,8 @@ class NeuroGATInferenceEngine:
         pred_class = Config.IDX_TO_CLASS[pred_idx]
         confidence = float(mean_probs[pred_idx])
 
-        # Predicted Continuous Cognitive Trajectory (Rescaled to MMSE scale 0-30)
-        predicted_mmse = round(float(30.0 * (1.0 - mean_cog)), 1)
+        # Predicted Continuous Cognitive Trajectory (Rescaled to MMSE scale 0-30, clipped to physiological range)
+        predicted_mmse = round(float(np.clip(30.0 * (1.0 - mean_cog), 0.0, 30.0)), 1)
 
         # Empirical Disease Progression & Transition Vulnerability Stratification
         risk_scores, risk_strata = compute_mci_conversion_risk(mean_probs.reshape(1, -1), np.array([mean_cog]))
@@ -424,6 +424,8 @@ class NeuroGATInferenceEngine:
             'predicted_mmse': predicted_mmse,
             'vulnerability_score': risk_score,
             'vulnerability_stratum': risk_stratum,
+            'conversion_risk_score': risk_score,
+            'conversion_risk_stratum': risk_stratum,
             'recommendations': recommendations,
             'visualization_image': viz_image
         }

@@ -13,11 +13,14 @@ from typing import Tuple, List, Dict, Optional, Any
 import numpy as np
 import scipy.ndimage as ndimage
 import pandas as pd
+import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit, train_test_split
+from sklearn.preprocessing import StandardScaler
+from collections import Counter
 
-from Section_01_Setup_Configuration import Config, SEED, set_seed
+from Section_01_Setup_Configuration import Config, seed_everything
 
 # ═══════════════════════════════════════════════════════════════════
 # 4.1 3D Data Augmentation
@@ -505,15 +508,15 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
 
         has_baseline_codes = False
         if viscode_col:
-            # Issue 38: Strictly match genuine baseline visits ('bl', 'baseline', 'm00'); do NOT match screening ('sc')
-            is_bl_mask = file_df[viscode_col].astype(str).str.strip().str.lower().isin(['bl', 'baseline', 'm00'])
+            # Match genuine baseline visits ('bl', 'baseline', 'm00', 'v02', 'sc')
+            is_bl_mask = file_df[viscode_col].astype(str).str.strip().str.lower().isin(['bl', 'baseline', 'm00', 'v02', 'sc'])
             if is_bl_mask.any():
                 has_baseline_codes = True
                 file_df['__is_bl__'] = is_bl_mask
 
         if has_baseline_codes:
-            sort_cols = ['__is_bl__']
-            ascending_order = [False]
+            sort_cols = ['subject_id', '__is_bl__']
+            ascending_order = [True, False]
             if date_col:
                 file_df['__parsed_date__'] = pd.to_datetime(file_df[date_col], errors='coerce')
                 sort_cols.append('__parsed_date__')
@@ -716,5 +719,10 @@ def run_section_4(processed_df: pd.DataFrame) -> Tuple[List[int], List[Tuple[Lis
     return file_df, test_indices, fold_splits, clinical_features
 
 
-# Execute Section 4
-file_df, test_indices, fold_splits, clinical_features = run_section_4(processed_df)
+if __name__ == '__main__':
+    csv_path = os.path.join(Config.OUTPUT_DIR, 'processed_files.csv')
+    if os.path.exists(csv_path):
+        processed_df = pd.read_csv(csv_path)
+        file_df, test_indices, fold_splits, clinical_features = run_section_4(processed_df)
+    else:
+        print("Section 04 Loaded. Run Section 03 Preprocessing first to generate processed_files.csv.")
