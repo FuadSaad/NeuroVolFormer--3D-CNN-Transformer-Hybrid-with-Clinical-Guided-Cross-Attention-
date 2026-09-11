@@ -363,6 +363,15 @@ def run_feature_extraction(file_df: pd.DataFrame, clinical_features: pd.DataFram
     print("  🚀 STARTING 3D FEATURE EXTRACTION (NEUROGAT)")
     print("="*70)
 
+    output_dir = getattr(Config, 'OUTPUT_DIR', getattr(Config, 'RESULTS_DIR', '/kaggle/working/outputs'))
+    os.makedirs(output_dir, exist_ok=True)
+    features_path = os.path.join(output_dir, 'node_features.npy')
+    labels_path = os.path.join(output_dir, 'node_labels.npy')
+
+    if os.path.exists(features_path) and os.path.exists(labels_path):
+        print(f"✅ Features already extracted at {features_path}. Skipping.")
+        return
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🖥️  Using Device: {device}")
 
@@ -388,15 +397,6 @@ def run_feature_extraction(file_df: pd.DataFrame, clinical_features: pd.DataFram
 
     all_features = []
     all_labels = []
-
-    output_dir = getattr(Config, 'OUTPUT_DIR', getattr(Config, 'RESULTS_DIR', '/kaggle/working/outputs'))
-    os.makedirs(output_dir, exist_ok=True)
-    features_path = os.path.join(output_dir, 'node_features.npy')
-    labels_path = os.path.join(output_dir, 'node_labels.npy')
-
-    if os.path.exists(features_path) and os.path.exists(labels_path):
-        print(f"✅ Features already extracted at {features_path}. Skipping.")
-        return
 
     print(f"⏳ Extracting features for {len(dataset)} patients... (Batch Size: {batch_size})")
 
