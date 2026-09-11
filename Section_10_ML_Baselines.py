@@ -97,6 +97,9 @@ def compute_mcnemar_test(y_true: np.ndarray, preds_proposed: np.ndarray, preds_b
     c: Proposed model incorrect, Baseline correct
     chi2 = (|b - c| - 1)^2 / (b + c)
     """
+    assert len(y_true) == len(preds_proposed) == len(preds_baseline), (
+        f"McNemar test sample size mismatch: y_true={len(y_true)}, proposed={len(preds_proposed)}, baseline={len(preds_baseline)}"
+    )
     from scipy.stats import chi2
     correct_p = (preds_proposed == y_true)
     correct_b = (preds_baseline == y_true)

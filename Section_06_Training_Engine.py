@@ -651,6 +651,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     cv_results = []
     oof_val_logits = []
     oof_val_labels = []
+    oof_val_indices = []
     oof_pca_ev = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
@@ -694,6 +695,7 @@ def train_gnn_5fold(features_path: str, labels_path: str):
 
         oof_val_logits.append(res['val_logits'])
         oof_val_labels.append(res['val_labels'])
+        oof_val_indices.append(val_idx)
         cv_results.append(res)
         del trainer
         del fold_graph
@@ -705,6 +707,20 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     print(f"\n🏆 Mean Validation Accuracy Across 5 Folds: {np.mean(val_accs)*100:.2f}% ± {np.std(val_accs)*100:.2f}%")
     if len(oof_pca_ev) > 0:
         print(f"📊 PCA(64) Cumulative Explained Variance Across 5 Folds: {np.mean(oof_pca_ev):.2f}% ± {np.std(oof_pca_ev):.2f}%")
+
+    # Verify Out-of-Fold (OOF) index completeness (Priority 3 & Critique 19)
+    if len(oof_val_indices) > 0:
+        all_oof_indices = np.concatenate(oof_val_indices)
+        assert len(all_oof_indices) == len(train_val_indices), (
+            f"OOF subject count mismatch: {len(all_oof_indices)} != development cohort {len(train_val_indices)}"
+        )
+        assert len(set(all_oof_indices)) == len(train_val_indices), (
+            "Duplicate subject indices detected across OOF validation folds!"
+        )
+        assert set(all_oof_indices) == set(train_val_indices), (
+            "OOF validation partition indices do not match development cohort indices!"
+        )
+        print(f"✅ OOF Verification Passed: Exactly {len(all_oof_indices)} unique development subjects evaluated across 5 folds.")
 
     # Fit Post-Hoc Temperature Scaling on Out-of-Fold (OOF) Logits across all 5 folds
     temp_scaler = None
@@ -797,6 +813,35 @@ def train_gnn_5fold(features_path: str, labels_path: str):
     }, final_ckpt_path)
     torch.save({'model_state_dict': final_trainer.model.state_dict()}, os.path.join(checkpoint_dir, 'neurogat_best_model.pt'))
     print(f"💾 Exported final retrained model to: {final_ckpt_path}")
+
+    # Export Model Manifest binding all artifacts together (Critique 29)
+    import json
+    manifest = {
+        "protocol_version": "v5.0-Q1-Gold-Standard",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "feature_dim": int(final_graph.x.shape[1]),
+        "deep_cnn_dim": 1024,
+        "pca_dim": int(getattr(Config, 'PCA_DIM', 64)),
+        "radiomics_dim": int(getattr(Config, 'RADIOMICS_FEATURE_DIM', 68)),
+        "clinical_dim": int(getattr(Config, 'CLINICAL_FEATURE_DIM', 6)),
+        "total_input_dim": int(getattr(Config, 'TOTAL_FEATURE_DIM', 138)),
+        "num_classes": int(getattr(Config, 'NUM_CLASSES', 4)),
+        "class_names": list(getattr(Config, 'CLASS_NAMES', ['AD', 'CN', 'EMCI', 'LMCI'])),
+        "knn_k_list": list(k_list),
+        "model_checkpoint": "neurogat_final_model.pt",
+        "pca_artifact": "final_pca.joblib",
+        "scaler_artifact": "final_scaler.joblib",
+        "temperature_scaler_artifact": "temperature_scaler.pt",
+        "calibrated_temperature": float(temp_scaler.temperature) if temp_scaler is not None else 1.0,
+        "development_subjects": len(train_val_indices),
+        "held_out_test_subjects": len(test_indices),
+        "empirical_pca_explained_variance": float(final_ev) if features.shape[1] >= 1024 else None
+    }
+    for m_dir in [os.path.join(output_dir, 'results'), checkpoint_dir]:
+        os.makedirs(m_dir, exist_ok=True)
+        with open(os.path.join(m_dir, 'model_manifest.json'), 'w', encoding='utf-8') as mf:
+            json.dump(manifest, mf, indent=2)
+    print(f"📋 Model Manifest exported to {output_dir}/results/model_manifest.json and {checkpoint_dir}/model_manifest.json")
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 3: Single Definitive Test Evaluation (Test-Once Protocol)

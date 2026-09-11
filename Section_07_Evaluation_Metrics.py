@@ -211,6 +211,10 @@ def run_delong_significance_analysis(y_true: np.ndarray, probs_gnn: np.ndarray, 
     n_classes = Config.NUM_CLASSES
     baseline_all = _load_or_generate_independent_baseline_probs(y_true, n_classes)
 
+    assert len(y_true) == len(probs_gnn) == len(baseline_all), (
+        f"Sample size mismatch: y_true ({len(y_true)}), NeuroGAT ({len(probs_gnn)}), Baseline ({len(baseline_all)})"
+    )
+
     raw_results = []
     raw_p_values = []
 
@@ -219,6 +223,13 @@ def run_delong_significance_analysis(y_true: np.ndarray, probs_gnn: np.ndarray, 
         bin_true = (y_true == i).astype(int)
         gnn_scores = probs_gnn[:, i]
         baseline_scores = baseline_all[:, i]
+
+        # Verify predictions are not identical clones (Critique 15 & Priority 3)
+        if not np.allclose(baseline_scores, baseline_scores[0]):
+            assert not np.allclose(gnn_scores, baseline_scores), (
+                f"CRITICAL STATISTICAL ERROR: NeuroGAT scores and Baseline scores are identical for class {class_name}! "
+                "DeLong paired test requires independent predictions."
+            )
 
         auc_gnn, auc_base, z, p = delong_roc_test(bin_true, gnn_scores, baseline_scores)
         raw_p_values.append(p)

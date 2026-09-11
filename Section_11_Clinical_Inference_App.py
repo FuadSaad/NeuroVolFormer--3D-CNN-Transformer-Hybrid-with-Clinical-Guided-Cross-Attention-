@@ -41,14 +41,24 @@ except ImportError:
 
 try:
     from Section_01_Setup_Configuration import Config
+except ImportError as e:
+    raise RuntimeError(
+        "❌ Critical Dependency Error: Section_01_Setup_Configuration.Config is strictly required "
+        "for clinical inference to guarantee exact parameter and feature schema alignment with training."
+    ) from e
+
+try:
     from Section_03_Preprocessing import preprocess_mri_volume
+except ImportError:
+    preprocess_mri_volume = None
+
+try:
     from Section_05_Model_Architecture import NeuroGAT, build_multiscale_population_graph
     from Section_06_Training_Engine import compute_mci_conversion_risk
-except Exception:
-    if 'Config' not in globals() and 'Config' not in locals():
-        class Config:
-            pass
-    preprocess_mri_volume = None
+except ImportError as e:
+    raise RuntimeError(
+        f"❌ Critical Dependency Error: Missing model architecture or training engine components: {e}"
+    ) from e
 
 _defaults = {
     'SEED': 42,
@@ -62,13 +72,16 @@ _defaults = {
     'PREPROCESSED_DIR': '/kaggle/working/preprocessed' if os.path.exists('/kaggle') else './preprocessed',
     'KNN_K': 5,
     'KNN_K_LIST': [3, 5, 10],
+    'PCA_DIM': 64,
+    'RADIOMICS_FEATURE_DIM': 68,
+    'TOTAL_FEATURE_DIM': 138,
     'GAT_HIDDEN_DIM': 128,
     'GAT_HEADS': 4,
-    'GAT_DROPOUT': 0.35,
-    'CLASSIFIER_DROPOUT': 0.45,
-    'WEIGHT_DECAY': 0.005,
-    'L2_REGULARIZATION': 1e-3,
-    'AUX_COG_WEIGHT': 0.1,
+    'GAT_DROPOUT': 0.15,
+    'CLASSIFIER_DROPOUT': 0.20,
+    'WEIGHT_DECAY': 1e-4,
+    'L2_REGULARIZATION': 1e-4,
+    'AUX_COG_WEIGHT': 0.0,
     'CLINICAL_FEATURES': [
         'AGE', 'EDUCATION', 'GENDER', 'GDS_TOTAL', 'BP_Systolic', 'Pulse'
     ],
@@ -110,6 +123,8 @@ class NeuroGATInferenceEngine:
         self.ref_labels = None
         self.ref_scaler = None
         self.ref_graph = None
+        self.manifest = None
+        self._verify_manifest()
         self._load_reference_cohort()
 
         # Determine feature input dimension: Exactly 64 PCA + 68 Radiomics + 6 Demographics = 138-D
@@ -119,6 +134,30 @@ class NeuroGATInferenceEngine:
 
         # Load models
         self._load_checkpoints(checkpoint_path, in_dim)
+
+    def _verify_manifest(self):
+        """Verifies integrity and compatibility of models and preprocessors via model_manifest.json (Critique 29)."""
+        import json
+        manifest_candidates = [
+            os.path.join(Config.OUTPUT_DIR, 'results', 'model_manifest.json'),
+            os.path.join(getattr(Config, 'CHECKPOINT_DIR', './checkpoints'), 'model_manifest.json'),
+            'checkpoints/model_manifest.json'
+        ]
+        for mp in manifest_candidates:
+            if os.path.exists(mp):
+                try:
+                    with open(mp, 'r', encoding='utf-8') as mf:
+                        manifest = json.load(mf)
+                    print(f"📋 Verified Model Manifest from {mp} (Protocol: {manifest.get('protocol_version')})")
+                    expected_dim = manifest.get('total_input_dim', 138)
+                    assert expected_dim == getattr(Config, 'TOTAL_FEATURE_DIM', 138), (
+                        f"Dimension mismatch between manifest ({expected_dim}) and Config ({Config.TOTAL_FEATURE_DIM})"
+                    )
+                    self.manifest = manifest
+                    return
+                except Exception as e:
+                    print(f"⚠️ Manifest verification note: {e}")
+        self.manifest = None
 
     def _load_reference_cohort(self):
         """Loads reference population nodes to anchor query patients in the GAT graph using frozen training artifacts."""
@@ -144,23 +183,24 @@ class NeuroGATInferenceEngine:
                 raw_feat = np.load(f_path)
                 self.ref_labels = np.load(l_path)
 
-                # Point 12: Load frozen training PCA if available; never fit at inference!
+                # Point 12: Load frozen training PCA; fail loudly if missing to prevent distribution shift
                 if raw_feat.shape[1] >= 1024:
                     if joblib and os.path.exists(pca_path):
                         print(f"📦 Loading frozen training PCA from {pca_path}")
                         pca = joblib.load(pca_path)
                         deep_pca = pca.transform(raw_feat[:, :1024])
                     else:
-                        pca_dim = getattr(Config, 'PCA_DIM', 64)
-                        pca = PCA(n_components=pca_dim, random_state=getattr(Config, 'SEED', 42))
-                        deep_pca = pca.fit_transform(raw_feat[:, :1024])
+                        raise FileNotFoundError(
+                            f"CRITICAL: Frozen training PCA artifact (final_pca.joblib) not found at {pca_path}. "
+                            "Inference engine strictly forbids on-the-fly PCA fitting to eliminate clinical distribution shift."
+                        )
                     self.ref_features = np.concatenate([deep_pca, raw_feat[:, 1024:]], axis=1)
                 else:
                     self.ref_features = raw_feat
 
                 print(f"✅ Loaded reference cohort: {self.ref_features.shape[0]} patients, {self.ref_features.shape[1]} features.")
             except Exception as e:
-                print(f"⚠️ Could not load reference cohort: {e}")
+                print(f"⚠️ Reference cohort loading note: {e}")
 
     def _load_checkpoints(self, checkpoint_path: Optional[str], in_dim: int):
         """Loads trained weights for single or 5-fold ensemble inference."""

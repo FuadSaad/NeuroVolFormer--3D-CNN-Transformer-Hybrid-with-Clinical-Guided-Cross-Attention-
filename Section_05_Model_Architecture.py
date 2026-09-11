@@ -84,7 +84,9 @@ def build_multiscale_population_graph(
 
     # 2. Dimensionality Reduction for Deep Features if raw 1024-D
     if features.shape[1] >= 1024:
-        pca_dim = getattr(Config, 'PCA_DIM', 64)
+        req_pca_dim = getattr(Config, 'PCA_DIM', 64)
+        max_possible_dim = len(train_indices) - 1 if (train_indices is not None and len(train_indices) > 0) else len(deep_features) - 1
+        pca_dim = min(req_pca_dim, max(1, max_possible_dim))
         deep_features = features[:, :1024]
         handcrafted = features[:, 1024:]
 
@@ -119,25 +121,64 @@ def build_multiscale_population_graph(
     # Diagnostic labels and MMSE cognitive scores NEVER participate in graph topology construction.
     print("🛡️  Topology Guard: Constructing edges purely from unsupervised feature affinity (Zero Label / Cognitive Score Leakage).")
     max_k = max(k_list)
-    knn = NearestNeighbors(n_neighbors=max_k + 1, metric='cosine')
-    knn.fit(features_norm)
-    distances, indices = knn.kneighbors(features_norm)
-
     edge_dict = {}  # Map (src, dst) -> aggregated similarity across scales
     scale_weights = {k: 1.0 / len(k_list) for k in k_list}
-
     N = features_norm.shape[0]
-    for i in range(N):
-        for k in k_list:
-            for j in range(1, k + 1):
-                neighbor = indices[i, j]
-                sim = max(0.0, 1.0 - distances[i, j])
 
-                # Symmetrical directed edge pair
-                for edge in [(i, neighbor), (neighbor, i)]:
-                    if edge not in edge_dict:
-                        edge_dict[edge] = 0.0
-                    edge_dict[edge] += scale_weights[k] * sim
+    if train_indices is not None and len(train_indices) > 0:
+        print("🛡️  Strict Topology Isolation (Q1 Gold Standard):")
+        print("   - Training nodes connect strictly to training neighbors.")
+        print("   - Non-training nodes (Val/Test) attach only to training reference nodes.")
+        print("   - Zero edges between test nodes (0% test-test relational leakage).")
+        train_idx_arr = np.array(train_indices)
+        train_set = set(train_indices)
+        non_train_indices = [i for i in range(N) if i not in train_set]
+
+        # 1. Fit KNN strictly on training partition
+        knn_train = NearestNeighbors(n_neighbors=min(max_k + 1, len(train_idx_arr)), metric='cosine')
+        knn_train.fit(features_norm[train_idx_arr])
+
+        # 2. Internal training topology: training nodes connect only to other training nodes
+        dist_tr, idx_tr = knn_train.kneighbors(features_norm[train_idx_arr])
+        for local_i, global_i in enumerate(train_idx_arr):
+            for k in k_list:
+                for j in range(1, min(k + 1, len(train_idx_arr))):
+                    global_neighbor = train_idx_arr[idx_tr[local_i, j]]
+                    sim = max(0.0, 1.0 - dist_tr[local_i, j])
+                    for edge in [(global_i, global_neighbor), (global_neighbor, global_i)]:
+                        if edge not in edge_dict:
+                            edge_dict[edge] = 0.0
+                        edge_dict[edge] += scale_weights[k] * sim
+
+        # 3. Query topology: non-training nodes connect only to top-k training reference nodes
+        if len(non_train_indices) > 0:
+            dist_nt, idx_nt = knn_train.kneighbors(features_norm[non_train_indices])
+            for local_u, global_u in enumerate(non_train_indices):
+                for k in k_list:
+                    # Index 0 is the closest training node to global_u (since global_u is not in train set)
+                    for j in range(0, min(k, len(train_idx_arr))):
+                        global_neighbor = train_idx_arr[idx_nt[local_u, j]]
+                        sim = max(0.0, 1.0 - dist_nt[local_u, j])
+                        for edge in [(global_u, global_neighbor), (global_neighbor, global_u)]:
+                            if edge not in edge_dict:
+                                edge_dict[edge] = 0.0
+                            edge_dict[edge] += scale_weights[k] * sim
+    else:
+        knn = NearestNeighbors(n_neighbors=max_k + 1, metric='cosine')
+        knn.fit(features_norm)
+        distances, indices = knn.kneighbors(features_norm)
+
+        for i in range(N):
+            for k in k_list:
+                for j in range(1, k + 1):
+                    neighbor = indices[i, j]
+                    sim = max(0.0, 1.0 - distances[i, j])
+
+                    # Symmetrical directed edge pair
+                    for edge in [(i, neighbor), (neighbor, i)]:
+                        if edge not in edge_dict:
+                            edge_dict[edge] = 0.0
+                        edge_dict[edge] += scale_weights[k] * sim
 
     edge_src = []
     edge_dst = []
